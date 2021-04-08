@@ -1098,12 +1098,9 @@ impl Player {
                         globals,
                         actions.clip,
                     );
-                    if let Ok(prototype) = constructor
-                        .get("prototype", &mut activation)
-                        .map(|v| v.coerce_to_object(&mut activation))
-                    {
+                    if let Ok(prototype) = constructor.get("prototype", &mut activation) {
                         if let Value::Object(object) = actions.clip.object() {
-                            object.set_proto(activation.context.gc_context, Some(prototype));
+                            object.set_proto(activation.context.gc_context, prototype);
                             for event in events {
                                 let _ = activation.run_child_frame_for_action(
                                     "[Actions]",
@@ -1385,6 +1382,8 @@ impl Player {
     where
         F: for<'a, 'gc, 'gc_context> FnOnce(&mut UpdateContext<'a, 'gc, 'gc_context>) -> R,
     {
+        self.update_drag();
+
         let rval = self.mutate_with_update_context(|context| {
             let rval = func(context);
 
@@ -1394,7 +1393,6 @@ impl Player {
         });
 
         // Update mouse state (check for new hovered button, etc.)
-        self.update_drag();
         self.update_roll_over();
 
         // GC

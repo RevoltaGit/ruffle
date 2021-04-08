@@ -13,6 +13,7 @@ use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::{value, Avm2, Error};
 use crate::context::UpdateContext;
+use crate::swf::extensions::ReadSwfExt;
 use gc_arena::{Gc, GcCell, MutationContext};
 use smallvec::SmallVec;
 use swf::avm2::read::Reader;
@@ -533,6 +534,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             );
         }
 
+        let instruction_start = reader.pos(full_data);
         let op = reader.read_op();
         if let Ok(Some(op)) = op {
             avm_debug!(self.avm2(), "Opcode: {:?}", op);
@@ -678,6 +680,18 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 Op::DebugFile { file_name } => self.op_debug_file(method, file_name),
                 Op::DebugLine { line_num } => self.op_debug_line(line_num),
                 Op::TypeOf => self.op_type_of(),
+                Op::EscXAttr => self.op_esc_xattr(),
+                Op::EscXElem => self.op_esc_elem(),
+                Op::LookupSwitch {
+                    default_offset,
+                    case_offsets,
+                } => self.op_lookup_switch(
+                    default_offset,
+                    &case_offsets,
+                    instruction_start,
+                    reader,
+                    full_data,
+                ),
                 _ => self.unknown_op(op),
             };
 
@@ -2317,6 +2331,75 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             self.context.gc_context,
             type_name,
         )));
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::EscXAttr`
+    fn op_esc_xattr(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let s = self.context.avm2.pop().coerce_to_string(self)?;
+
+        // Implementation of `EscapeAttributeValue` from ECMA-357(10.2.1.2)
+        let mut r = String::new();
+        for c in s.chars() {
+            match c {
+                '"' => r += "&quot;",
+                '<' => r += "&lt;",
+                '&' => r += "&amp;",
+                '\u{000A}' => r += "&#xA;",
+                '\u{000D}' => r += "&#xD;",
+                '\u{0009}' => r += "&#x9;",
+                _ => r.push(c),
+            }
+        }
+        self.context
+            .avm2
+            .push(AvmString::new(self.context.gc_context, r));
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::EscXElem`
+    fn op_esc_elem(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let s = self.context.avm2.pop().coerce_to_string(self)?;
+
+        // contrary to the avmplus documentation, this escapes the value on the top of the stack using EscapeElementValue from ECMA-357 *NOT* EscapeAttributeValue.
+        // Implementation of `EscapeElementValue` from ECMA-357(10.2.1.1)
+        let mut r = String::new();
+        for c in s.chars() {
+            match c {
+                '<' => r += "&lt;",
+                '>' => r += "&gt;",
+                '&' => r += "&amp;",
+                _ => r.push(c),
+            }
+        }
+        self.context
+            .avm2
+            .push(AvmString::new(self.context.gc_context, r));
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::LookupSwitch`
+    fn op_lookup_switch<'b>(
+        &mut self,
+        default_offset: i32,
+        case_offsets: &[i32],
+        instruction_start: usize,
+        reader: &mut Reader<'b>,
+        full_data: &'b [u8],
+    ) -> Result<FrameControl<'gc>, Error> {
+        let index = self.context.avm2.pop().coerce_to_i32(self)?;
+
+        let offset = case_offsets
+            .get(index as usize)
+            .copied()
+            .unwrap_or(default_offset)
+            + instruction_start as i32
+            - reader.pos(full_data) as i32;
+
+        reader.seek(full_data, offset);
 
         Ok(FrameControl::Continue)
     }
