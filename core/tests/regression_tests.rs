@@ -203,6 +203,7 @@ swf_tests! {
     (xml_append_child, "avm1/xml_append_child", 1),
     (xml_append_child_with_parent, "avm1/xml_append_child_with_parent", 1),
     (xml_remove_node, "avm1/xml_remove_node", 1),
+    (xml_reparenting, "avm1/xml_reparenting", 1),
     (xml_insert_before, "avm1/xml_insert_before", 1),
     (xml_to_string, "avm1/xml_to_string", 1),
     (xml_to_string_comment, "avm1/xml_to_string_comment", 1),
@@ -225,6 +226,7 @@ swf_tests! {
     (loadmovie, "avm1/loadmovie", 2),
     (loadmovienum, "avm1/loadmovienum", 2),
     (loadmovie_registerclass, "avm1/loadmovie_registerclass", 2),
+    (loadmovie_replace_root, "avm1/loadmovie_replace_root", 3),
     (loadmovie_method, "avm1/loadmovie_method", 2),
     (loadmovie_fail, "avm1/loadmovie_fail", 1),
     (unloadmovie, "avm1/unloadmovie", 11),
@@ -548,6 +550,7 @@ swf_tests! {
     (as3_loaderinfo_quine, "avm2/loaderinfo_quine", 2),
     (nan_scale, "avm1/nan_scale", 1),
     (as3_nan_scale, "avm2/nan_scale", 1),
+    (as3_documentclass, "avm2/documentclass", 1),
 }
 
 // TODO: These tests have some inaccuracies currently, so we use approx_eq to test that numeric values are close enough.

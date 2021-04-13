@@ -14,16 +14,14 @@ module.exports = (env, argv) => {
     return {
         mode,
         entry: {
-            ruffle: path.resolve(__dirname, "js/index.js"),
-            main: path.resolve(__dirname, "js/main.js"),
+            popup: path.resolve(__dirname, "js/popup.js"),
             settings: path.resolve(__dirname, "js/settings.js"),
             lv0: path.resolve(__dirname, "js/lv0.js"),
+            ruffle: path.resolve(__dirname, "js/index.js"),
         },
         output: {
-            path: path.resolve(__dirname, "build/dist"),
-            filename: "[name].js",
+            path: path.resolve(__dirname, "build/dist/"),
             publicPath: "",
-            chunkFilename: "core.ruffle.js",
             clean: true,
         },
         module: {
@@ -36,7 +34,30 @@ module.exports = (env, argv) => {
         },
         plugins: [
             new CopyPlugin({
-                patterns: [{ from: "LICENSE*" }, { from: "README.md" }],
+                patterns: [
+                    {
+                        from: "manifest.json",
+                        to: "..",
+                        transform(content) {
+                            const manifest = JSON.parse(content.toString());
+                            const { version } = require("./package.json");
+                            Object.assign(manifest, { version });
+                            if (env.firefox) {
+                                const id =
+                                    process.env.FIREFOX_EXTENSION_ID ||
+                                    "ruffle-player-extension@ruffle.rs";
+                                Object.assign(manifest, {
+                                    browser_specific_settings: {
+                                        gecko: { id },
+                                    },
+                                });
+                            }
+                            return JSON.stringify(manifest);
+                        },
+                    },
+                    { from: "LICENSE*" },
+                    { from: "README.md" },
+                ],
             }),
         ],
     };

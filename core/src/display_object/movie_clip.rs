@@ -595,8 +595,6 @@ impl<'gc> MovieClip<'gc> {
                         if id == 0 {
                             //TODO: This assumes only the root movie has `SymbolClass` tags.
                             self.set_avm2_constructor(activation.context.gc_context, Some(proto));
-                            self.allocate_as_avm2_object(&mut activation.context, self.into());
-                            self.construct_as_avm2_object(&mut activation.context);
                         } else if let Some(Character::MovieClip(mc)) = library.character_by_id(id) {
                             mc.set_avm2_constructor(activation.context.gc_context, Some(proto))
                         } else {
@@ -1681,9 +1679,13 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         // AVM1 code expects to execute in line with timeline instructions, so
         // it's exempted from frame construction.
         if self.vm_type(context) == AvmType::Avm2 {
-            if matches!(self.object2(), Avm2Value::Undefined) {
-                self.allocate_as_avm2_object(context, (*self).into())
-            }
+            let needs_construction = if matches!(self.object2(), Avm2Value::Undefined) {
+                self.allocate_as_avm2_object(context, (*self).into());
+
+                true
+            } else {
+                false
+            };
 
             if self.determine_next_frame() != NextFrame::First {
                 let mc = self.0.read();
@@ -1710,6 +1712,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                     _ => Ok(()),
                 };
                 let _ = tag_utils::decode_tags(&mut reader, tag_callback, TagCode::ShowFrame);
+            }
+
+            if needs_construction {
+                self.construct_as_avm2_object(context);
             }
         }
     }
@@ -1804,10 +1810,49 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         &self,
         context: &mut UpdateContext<'_, 'gc, '_>,
         point: (Twips, Twips),
+        options: HitTestOptions,
     ) -> bool {
+        if options.skip_invisible && !self.visible() && self.maskee().is_none() {
+            return false;
+        }
+
+        if options.skip_mask && self.maskee().is_some() {
+            return false;
+        }
+
         if self.world_bounds().contains(point) {
-            for child in self.iter_execution_list() {
-                if child.hit_test_shape(context, point) {
+            if let Some(masker) = self.masker() {
+                if !masker.hit_test_shape(
+                    context,
+                    point,
+                    HitTestOptions {
+                        skip_mask: false,
+                        skip_invisible: true,
+                    },
+                ) {
+                    return false;
+                }
+            }
+
+            let mut clip_depth = 0;
+
+            for child in self.iter_render_list() {
+                if child.clip_depth() > 0 {
+                    if child.hit_test_shape(
+                        context,
+                        point,
+                        HitTestOptions {
+                            skip_mask: true,
+                            skip_invisible: true,
+                        },
+                    ) {
+                        clip_depth = 0;
+                    } else {
+                        clip_depth = child.clip_depth();
+                    }
+                } else if child.depth() > clip_depth
+                    && child.hit_test_shape(context, point, options)
+                {
                     return true;
                 }
             }
@@ -1829,6 +1874,19 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         point: (Twips, Twips),
     ) -> Option<DisplayObject<'gc>> {
         if self.visible() {
+            if let Some(masker) = self.masker() {
+                if !masker.hit_test_shape(
+                    context,
+                    point,
+                    HitTestOptions {
+                        skip_mask: false,
+                        skip_invisible: true,
+                    },
+                ) {
+                    return None;
+                }
+            }
+
             if self.world_bounds().contains(point) {
                 // This movieclip operates in "button mode" if it has a mouse handler,
                 // either via on(..) or via property mc.onRelease, etc.
@@ -1848,18 +1906,52 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                     }
                 };
 
-                if is_button_mode && self.hit_test_shape(context, point) {
+                if is_button_mode
+                    && self.hit_test_shape(
+                        context,
+                        point,
+                        HitTestOptions {
+                            skip_mask: self.maskee().is_none(),
+                            skip_invisible: true,
+                        },
+                    )
+                {
                     return Some(self_node);
                 }
             }
 
             // Maybe we could skip recursing down at all if !world_bounds.contains(point),
             // but a child button can have an invisible hit area outside the parent's bounds.
+            let mut hit_depth = 0;
+            let mut result = None;
+
             for child in self.iter_render_list().rev() {
-                let result = child.mouse_pick(context, child, point);
-                if result.is_some() {
-                    return result;
+                if child.clip_depth() > 0 {
+                    if result.is_some() && child.clip_depth() >= hit_depth {
+                        if child.hit_test_shape(
+                            context,
+                            point,
+                            HitTestOptions {
+                                skip_mask: true,
+                                skip_invisible: true,
+                            },
+                        ) {
+                            return result;
+                        } else {
+                            result = None;
+                        }
+                    }
+                } else if result.is_none() {
+                    result = child.mouse_pick(context, child, point);
+
+                    if result.is_some() {
+                        hit_depth = child.depth();
+                    }
                 }
+            }
+
+            if result.is_some() {
+                return result;
             }
         }
 
@@ -1924,9 +2016,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         self.set_default_instance_name(context);
 
         let vm_type = self.vm_type(context);
-        if vm_type == AvmType::Avm2 {
-            self.construct_as_avm2_object(context);
-        } else if vm_type == AvmType::Avm1 {
+        if vm_type == AvmType::Avm1 {
             self.construct_as_avm1_object(
                 context,
                 display_object,

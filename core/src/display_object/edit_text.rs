@@ -1347,6 +1347,14 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         Some(self.0.read().static_data.swf.clone())
     }
 
+    /// Construct objects placed on this frame.
+    fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
+        if self.vm_type(context) == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined)
+        {
+            self.construct_as_avm2_object(context, (*self).into());
+        }
+    }
+
     fn run_frame(&self, _context: &mut UpdateContext) {
         // Noop
     }
@@ -1382,9 +1390,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         let library = context.library.library_for_movie_mut(movie);
         let vm_type = library.avm_type();
 
-        if vm_type == AvmType::Avm2 {
-            self.construct_as_avm2_object(context, display_object);
-        } else if vm_type == AvmType::Avm1 {
+        if vm_type == AvmType::Avm1 {
             self.construct_as_avm1_object(context, display_object, run_frame);
         }
     }
@@ -1606,7 +1612,17 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         point: (Twips, Twips),
     ) -> Option<DisplayObject<'gc>> {
         // The button is hovered if the mouse is over any child nodes.
-        if self.visible() && self.is_selectable() && self.hit_test_shape(context, point) {
+        if self.visible()
+            && self.is_selectable()
+            && self.hit_test_shape(
+                context,
+                point,
+                HitTestOptions {
+                    skip_mask: true,
+                    skip_invisible: true,
+                },
+            )
+        {
             Some(self_node)
         } else {
             None
