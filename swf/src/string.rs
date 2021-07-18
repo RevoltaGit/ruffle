@@ -115,7 +115,7 @@ impl SwfStr {
         string: &'a str,
         encoding: &'static Encoding,
     ) -> Option<&'a Self> {
-        if let (Cow::Borrowed(s), _, false) = encoding.encode(&string) {
+        if let (Cow::Borrowed(s), _, false) = encoding.encode(string) {
             Some(Self::from_bytes(s))
         } else {
             None
@@ -257,9 +257,18 @@ impl<'a, T: ?Sized + AsRef<str>> PartialEq<T> for SwfStr {
 impl fmt::Debug for SwfStr {
     /// Formats the `SwfStr` using the given formatter.
     ///
-    /// Note: this method assumes UTF-8 encoding;
-    /// other encodings like Shift-JIS will output gibberish.
+    /// Non-ASCII characters will be formatted in hexadecimal
+    /// form (`\xNN`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_str_lossy(UTF_8))
+        fmt::Write::write_char(f, '"')?;
+        for chr in self
+            .string
+            .iter()
+            .map(|&c| std::ascii::escape_default(c))
+            .flatten()
+        {
+            fmt::Write::write_char(f, char::from(chr))?;
+        }
+        fmt::Write::write_char(f, '"')
     }
 }

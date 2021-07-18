@@ -1,6 +1,5 @@
 //! Layout box structure
 
-use crate::collect::CollectWrapper;
 use crate::context::UpdateContext;
 use crate::drawing::Drawing;
 use crate::font::{EvalParameters, Font};
@@ -22,7 +21,7 @@ fn draw_underline(drawing: &mut Drawing, starting_pos: Position<Twips>, width: T
         return;
     }
 
-    let ending_pos = starting_pos + Position::from((width, Twips::zero()));
+    let ending_pos = starting_pos + Position::from((width, Twips::ZERO));
 
     drawing.draw_command(DrawCommand::MoveTo {
         x: starting_pos.x(),
@@ -114,7 +113,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
         // and adds one. I'm not sure why.
         self.font
             .map(|f| f.get_leading_for_height(self.max_font_size))
-            .unwrap_or_else(Twips::zero)
+            .unwrap_or_default()
     }
 
     /// Calculate the line-to-line leading present on this line, including the
@@ -122,7 +121,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
     fn line_leading_adjustment(&self) -> Twips {
         self.font
             .map(|f| f.get_leading_for_height(self.max_font_size))
-            .unwrap_or_else(Twips::zero)
+            .unwrap_or_default()
             + Twips::from_pixels(self.current_line_span.leading)
     }
 
@@ -188,7 +187,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
                             if tf.underline.unwrap_or(false) {
                                 starting_pos = Some(
                                     linebox.bounds().origin()
-                                        + Position::from((Twips::zero(), underline_baseline)),
+                                        + Position::from((Twips::ZERO, underline_baseline)),
                                 );
                                 current_width = Some(linebox.bounds().width());
                             }
@@ -235,11 +234,9 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
             //Flash ignores trailing spaces when aligning lines, so should we
             if self.current_line_span.align != swf::TextAlign::Left {
-                linebox.bounds = linebox.bounds.with_size(Size::from(font.measure(
-                    text.trim_end(),
-                    params,
-                    false,
-                )));
+                linebox.bounds = linebox
+                    .bounds
+                    .with_size(font.measure(text.trim_end(), params, false).into());
             }
 
             if let Some(line_bounds) = &mut line_bounds {
@@ -582,7 +579,8 @@ pub enum LayoutContent<'gc> {
         params: EvalParameters,
 
         /// The color to render the font with.
-        color: CollectWrapper<swf::Color>,
+        #[collect(require_static)]
+        color: swf::Color,
     },
 
     /// A layout box containing a bullet.
@@ -601,7 +599,8 @@ pub enum LayoutContent<'gc> {
         params: EvalParameters,
 
         /// The color to render the font with.
-        color: CollectWrapper<swf::Color>,
+        #[collect(require_static)]
+        color: swf::Color,
     },
 
     /// A layout box containing a drawing.
@@ -625,7 +624,7 @@ impl<'gc> LayoutBox<'gc> {
                 text_format: span.get_text_format(),
                 font,
                 params,
-                color: CollectWrapper(span.color.clone()),
+                color: span.color.clone(),
             },
         }
     }
@@ -640,7 +639,7 @@ impl<'gc> LayoutBox<'gc> {
                 text_format: span.get_text_format(),
                 font,
                 params,
-                color: CollectWrapper(span.color.clone()),
+                color: span.color.clone(),
             },
         }
     }
@@ -668,7 +667,7 @@ impl<'gc> LayoutBox<'gc> {
         let mut layout_context = LayoutContext::new(movie, bounds, fs.displayed_text());
 
         for (span_start, _end, span_text, span) in fs.iter_spans() {
-            if let Some(font) = layout_context.resolve_font(context, &span, is_device_font) {
+            if let Some(font) = layout_context.resolve_font(context, span, is_device_font) {
                 layout_context.newspan(span);
 
                 let params = EvalParameters::from_span(span);
@@ -685,7 +684,7 @@ impl<'gc> LayoutBox<'gc> {
                     };
 
                     match delimiter {
-                        Some('\n') | Some('\r') => layout_context.explicit_newline(context),
+                        Some('\n' | '\r') => layout_context.explicit_newline(context),
                         Some('\t') => layout_context.tab(),
                         _ => {}
                     }
@@ -695,7 +694,7 @@ impl<'gc> LayoutBox<'gc> {
                     let mut last_breakpoint = 0;
 
                     if is_word_wrap {
-                        let (mut width, mut offset) = layout_context.wrap_dimensions(&span);
+                        let (mut width, mut offset) = layout_context.wrap_dimensions(span);
 
                         while let Some(breakpoint) = font.wrap_line(
                             &text[last_breakpoint..],
@@ -704,10 +703,17 @@ impl<'gc> LayoutBox<'gc> {
                             offset,
                             layout_context.is_start_of_line(),
                         ) {
-                            if breakpoint == 0 {
+                            // If text doesn't fit at the start of a line, it
+                            // won't fit on the next either, abort and put the
+                            // whole text on the line (will be cut-off). This
+                            // can happen for small text fields with single
+                            // characters.
+                            if breakpoint == 0 && layout_context.is_start_of_line() {
+                                break;
+                            } else if breakpoint == 0 {
                                 layout_context.newline(context);
 
-                                let next_dim = layout_context.wrap_dimensions(&span);
+                                let next_dim = layout_context.wrap_dimensions(span);
 
                                 width = next_dim.0;
                                 offset = next_dim.1;
@@ -739,7 +745,7 @@ impl<'gc> LayoutBox<'gc> {
                             }
 
                             layout_context.newline(context);
-                            let next_dim = layout_context.wrap_dimensions(&span);
+                            let next_dim = layout_context.wrap_dimensions(span);
 
                             width = next_dim.0;
                             offset = next_dim.1;
@@ -787,17 +793,17 @@ impl<'gc> LayoutBox<'gc> {
                 color,
             } => Some((
                 text.get(*start..*end)?,
-                &text_format,
+                text_format,
                 *font,
                 *params,
-                color.0.clone(),
+                color.clone(),
             )),
             LayoutContent::Bullet {
                 text_format,
                 font,
                 params,
                 color,
-            } => Some(("\u{2022}", &text_format, *font, *params, color.0.clone())),
+            } => Some(("\u{2022}", text_format, *font, *params, color.clone())),
             LayoutContent::Drawing(..) => None,
         }
     }
@@ -812,19 +818,11 @@ impl<'gc> LayoutBox<'gc> {
     }
 
     pub fn is_text_box(&self) -> bool {
-        match &self.content {
-            LayoutContent::Text { .. } => true,
-            LayoutContent::Bullet { .. } => false,
-            LayoutContent::Drawing(..) => false,
-        }
+        matches!(&self.content, LayoutContent::Text { .. })
     }
 
     pub fn is_bullet(&self) -> bool {
-        match &self.content {
-            LayoutContent::Text { .. } => false,
-            LayoutContent::Bullet { .. } => true,
-            LayoutContent::Drawing(..) => false,
-        }
+        matches!(&self.content, LayoutContent::Bullet { .. })
     }
 
     /// Construct a duplicate layout box structure.

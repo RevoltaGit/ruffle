@@ -7,7 +7,6 @@ use crate::backend::navigator::OwnedFuture;
 use crate::context::{ActionQueue, ActionType};
 use crate::display_object::{DisplayObject, MorphShape, TDisplayObject};
 use crate::player::{Player, NEWEST_PLAYER_VERSION};
-use crate::property_map::PropertyMap;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
 use crate::xml::XmlNode;
@@ -127,7 +126,8 @@ impl<'gc> LoadManager<'gc> {
         player: Weak<Mutex<Player>>,
         fetch: OwnedFuture<Vec<u8>, Error>,
         url: String,
-        parameters: PropertyMap<String>,
+        parameters: Vec<(String, String)>,
+        on_metadata: Box<dyn FnOnce(&swf::HeaderExt)>,
     ) -> OwnedFuture<(), Error> {
         let loader = Loader::RootMovie { self_handle: None };
         let handle = self.add_loader(loader);
@@ -135,7 +135,7 @@ impl<'gc> LoadManager<'gc> {
         let loader = self.get_loader_mut(handle).unwrap();
         loader.introduce_loader_handle(handle);
 
-        loader.root_movie_loader(player, fetch, url, parameters)
+        loader.root_movie_loader(player, fetch, url, parameters, on_metadata)
     }
 
     /// Kick off a movie clip load.
@@ -281,7 +281,7 @@ pub enum Loader<'gc> {
         self_handle: Option<Handle>,
     },
 
-    /// Loader that is loading a new movie into a movieclip.
+    /// Loader that is loading a new movie into a MovieClip.
     Movie {
         /// The handle to refer to this loader instance.
         #[collect(require_static)]
@@ -365,7 +365,8 @@ impl<'gc> Loader<'gc> {
         player: Weak<Mutex<Player>>,
         fetch: OwnedFuture<Vec<u8>, Error>,
         mut url: String,
-        parameters: PropertyMap<String>,
+        parameters: Vec<(String, String)>,
+        on_metadata: Box<dyn FnOnce(&swf::HeaderExt)>,
     ) -> OwnedFuture<(), Error> {
         let _handle = match self {
             Loader::RootMovie { self_handle, .. } => {
@@ -396,11 +397,9 @@ impl<'gc> Loader<'gc> {
             });
 
             if let Ok((_length, mut movie)) = data {
-                for (key, value) in parameters.iter() {
-                    movie.parameters_mut().insert(key, value.to_owned(), false);
-                }
+                on_metadata(movie.header());
+                movie.append_parameters(parameters);
                 player.lock().unwrap().set_root_movie(Arc::new(movie));
-
                 Ok(())
             } else {
                 Err(Error::FetchError(url))
@@ -450,9 +449,7 @@ impl<'gc> Loader<'gc> {
                         _ => unreachable!(),
                     };
 
-                    if let Some(root) = uc.levels.get(&0).copied() {
-                        replacing_root_movie = DisplayObject::ptr_eq(clip, root);
-                    }
+                    replacing_root_movie = DisplayObject::ptr_eq(clip, uc.stage.root_clip());
 
                     clip.as_movie_clip().unwrap().unload(uc);
 
@@ -491,12 +488,6 @@ impl<'gc> Loader<'gc> {
                     .lock()
                     .expect("Could not lock player!!")
                     .update(|uc| {
-                        let domain =
-                            Avm2Domain::movie_domain(uc.gc_context, uc.avm2.global_domain());
-                        uc.library
-                            .library_for_movie_mut(movie.clone())
-                            .set_avm2_domain(domain);
-
                         let (clip, broadcaster) = match uc.load_manager.get_loader(handle) {
                             Some(Loader::Movie {
                                 target_clip,
@@ -506,6 +497,12 @@ impl<'gc> Loader<'gc> {
                             None => return Err(Error::Cancelled),
                             _ => unreachable!(),
                         };
+
+                        let domain =
+                            Avm2Domain::movie_domain(uc.gc_context, uc.avm2.global_domain());
+                        let library = uc.library.library_for_movie_mut(movie.clone());
+
+                        library.set_avm2_domain(domain);
 
                         if let Some(broadcaster) = broadcaster {
                             Avm1::run_stack_frame_for_method(

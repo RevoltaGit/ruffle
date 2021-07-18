@@ -19,14 +19,17 @@ extern crate smallvec;
 extern crate downcast_rs;
 
 #[macro_use]
+extern crate num_derive;
+
+#[macro_use]
 mod avm1;
 mod avm2;
 pub mod bitmap;
 mod bounding_box;
 mod character;
-mod collect;
 pub mod color_transform;
 pub mod context;
+pub mod context_menu;
 mod drawing;
 mod ecma_conversions;
 pub mod events;
@@ -35,9 +38,9 @@ mod font;
 mod html;
 mod library;
 pub mod loader;
+pub mod matrix;
 mod player;
 mod prelude;
-pub mod property_map;
 pub mod shape_utils;
 pub mod string_utils;
 pub mod tag_utils;
@@ -51,6 +54,7 @@ pub mod config;
 pub mod external;
 
 pub use chrono;
+pub use context_menu::ContextMenuItem;
 pub use events::PlayerEvent;
 pub use indexmap;
 pub use player::Player;

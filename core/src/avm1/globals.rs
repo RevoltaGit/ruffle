@@ -2,6 +2,7 @@ use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::property::Attribute;
+use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{AvmString, Object, ScriptObject, TObject, Value};
 use gc_arena::Collect;
 use gc_arena::MutationContext;
@@ -58,15 +59,31 @@ mod transform;
 mod video;
 mod xml;
 
+const GLOBAL_DECLS: &[Declaration] = declare_properties! {
+    "isFinite" => method(is_finite; DONT_ENUM);
+    "isNaN" => method(is_nan; DONT_ENUM);
+    "parseInt" => method(parse_int; DONT_ENUM);
+    "parseFloat" => method(parse_float; DONT_ENUM);
+    "random" => method(random; DONT_ENUM);
+    "ASSetPropFlags" => method(object::as_set_prop_flags; DONT_ENUM);
+    "clearInterval" => method(clear_interval; DONT_ENUM);
+    "setInterval" => method(set_interval; DONT_ENUM);
+    "clearTimeout" => method(clear_timeout; DONT_ENUM);
+    "setTimeout" => method(set_timeout; DONT_ENUM);
+    "updateAfterEvent" => method(update_after_event; DONT_ENUM);
+    "escape" => method(escape; DONT_ENUM);
+    "unescape" => method(unescape; DONT_ENUM);
+    "NaN" => property(get_nan; DONT_ENUM);
+    "Infinity" => property(get_infinity; DONT_ENUM);
+};
+
 pub fn random<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     match args.get(0) {
-        Some(&Value::Number(max)) => {
-            Ok(activation.context.rng.gen_range(0.0f64..max).floor().into())
-        }
+        Some(&Value::Number(max)) => Ok(activation.context.rng.gen_range(0.0..max).floor().into()),
         _ => Ok(Value::Undefined), //TODO: Shouldn't this be an error condition?
     }
 }
@@ -204,7 +221,7 @@ pub fn get_infinity<'gc>(
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.current_swf_version() > 4 {
+    if activation.swf_version() > 4 {
         Ok(f64::INFINITY.into())
     } else {
         Ok(Value::Undefined)
@@ -216,7 +233,7 @@ pub fn get_nan<'gc>(
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.current_swf_version() > 4 {
+    if activation.swf_version() > 4 {
         Ok(f64::NAN.into())
     } else {
         Ok(Value::Undefined)
@@ -283,7 +300,6 @@ pub fn parse_float<'gc>(
 
 pub fn set_interval<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
-
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -292,7 +308,6 @@ pub fn set_interval<'gc>(
 
 pub fn set_timeout<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
-
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -301,7 +316,6 @@ pub fn set_timeout<'gc>(
 
 pub fn create_timer<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
-
     _this: Object<'gc>,
     args: &[Value<'gc>],
     is_timeout: bool,
@@ -344,7 +358,6 @@ pub fn create_timer<'gc>(
 
 pub fn clear_interval<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
-
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -354,6 +367,22 @@ pub fn clear_interval<'gc>(
         .coerce_to_i32(activation)?;
     if !activation.context.timers.remove(id) {
         log::info!("clearInterval: Timer {} does not exist", id);
+    }
+
+    Ok(Value::Undefined)
+}
+
+pub fn clear_timeout<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    _this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let id = args
+        .get(0)
+        .unwrap_or(&Value::Undefined)
+        .coerce_to_i32(activation)?;
+    if !activation.context.timers.remove(id) {
+        log::info!("clearTimeout: Timer {} does not exist", id);
     }
 
     Ok(Value::Undefined)
@@ -465,6 +494,7 @@ pub struct SystemPrototypes<'gc> {
     pub array: Object<'gc>,
     pub array_constructor: Object<'gc>,
     pub xml_node: Object<'gc>,
+    pub xml_constructor: Object<'gc>,
     pub string: Object<'gc>,
     pub number: Object<'gc>,
     pub boolean: Object<'gc>,
@@ -505,6 +535,7 @@ pub struct SystemPrototypes<'gc> {
     pub gradient_glow_filter: Object<'gc>,
     pub gradient_glow_filter_constructor: Object<'gc>,
     pub date: Object<'gc>,
+    pub date_constructor: Object<'gc>,
     pub bitmap_data: Object<'gc>,
     pub bitmap_data_constructor: Object<'gc>,
     pub video: Object<'gc>,
@@ -658,7 +689,7 @@ pub fn create_globals<'gc>(
         Some(function_proto),
         text_format_proto,
     );
-    let array = array::create_array_object(gc_context, array_proto, Some(function_proto));
+    let array = array::create_array_object(gc_context, array_proto, function_proto);
     let xmlnode = FunctionObject::constructor(
         gc_context,
         Executable::Native(xml::xmlnode_constructor),
@@ -673,10 +704,10 @@ pub fn create_globals<'gc>(
         Some(function_proto),
         xml_proto,
     );
-    let string = string::create_string_object(gc_context, string_proto, Some(function_proto));
-    let number = number::create_number_object(gc_context, number_proto, Some(function_proto));
+    let string = string::create_string_object(gc_context, string_proto, function_proto);
+    let number = number::create_number_object(gc_context, number_proto, function_proto);
     let boolean = boolean::create_boolean_object(gc_context, boolean_proto, Some(function_proto));
-    let date = date::create_date_object(gc_context, date_proto, Some(function_proto));
+    let date = date::create_date_object(gc_context, date_proto, function_proto);
 
     let flash = ScriptObject::object(gc_context, Some(object_proto));
 
@@ -685,7 +716,7 @@ pub fn create_globals<'gc>(
     let display = ScriptObject::object(gc_context, Some(object_proto));
 
     let matrix = matrix::create_matrix_object(gc_context, matrix_proto, Some(function_proto));
-    let point = point::create_point_object(gc_context, point_proto, Some(function_proto));
+    let point = point::create_point_object(gc_context, point_proto, function_proto);
     let rectangle =
         rectangle::create_rectangle_object(gc_context, rectangle_proto, Some(function_proto));
     let color_transform = FunctionObject::constructor(
@@ -734,8 +765,7 @@ pub fn create_globals<'gc>(
         Attribute::empty(),
     );
 
-    let bitmap_filter_proto =
-        bitmap_filter::create_proto(gc_context, object_proto, Some(function_proto));
+    let bitmap_filter_proto = bitmap_filter::create_proto(gc_context, object_proto, function_proto);
     let bitmap_filter = FunctionObject::constructor(
         gc_context,
         Executable::Native(bitmap_filter::constructor),
@@ -898,7 +928,7 @@ pub fn create_globals<'gc>(
 
     let bitmap_data_proto = bitmap_data::create_proto(gc_context, object_proto, function_proto);
     let bitmap_data =
-        bitmap_data::create_bitmap_data_object(gc_context, bitmap_data_proto, Some(function_proto));
+        bitmap_data::create_bitmap_data_object(gc_context, bitmap_data_proto, function_proto);
 
     display.define_value(
         gc_context,
@@ -922,7 +952,7 @@ pub fn create_globals<'gc>(
         Attribute::empty(),
     );
 
-    let mut globals = ScriptObject::bare_object(gc_context);
+    let globals = ScriptObject::bare_object(gc_context);
     globals.define_value(
         gc_context,
         "AsBroadcaster",
@@ -981,11 +1011,8 @@ pub fn create_globals<'gc>(
 
     let shared_object_proto = shared_object::create_proto(gc_context, object_proto, function_proto);
 
-    let shared_obj = shared_object::create_shared_object_object(
-        gc_context,
-        shared_object_proto,
-        Some(function_proto),
-    );
+    let shared_obj =
+        shared_object::create_shared_object_object(gc_context, shared_object_proto, function_proto);
     globals.define_value(
         gc_context,
         "SharedObject",
@@ -1041,7 +1068,7 @@ pub fn create_globals<'gc>(
     let system_ime = system_ime::create(
         gc_context,
         Some(object_proto),
-        Some(function_proto),
+        function_proto,
         broadcaster_functions,
         array_proto,
     );
@@ -1059,11 +1086,7 @@ pub fn create_globals<'gc>(
     globals.define_value(
         gc_context,
         "Math",
-        Value::Object(math::create(
-            gc_context,
-            Some(object_proto),
-            Some(function_proto),
-        )),
+        Value::Object(math::create(gc_context, Some(object_proto), function_proto)),
         Attribute::DONT_ENUM,
     );
     globals.define_value(
@@ -1072,7 +1095,7 @@ pub fn create_globals<'gc>(
         Value::Object(mouse::create_mouse_object(
             gc_context,
             Some(object_proto),
-            Some(function_proto),
+            function_proto,
             broadcaster_functions,
             array_proto,
         )),
@@ -1084,7 +1107,7 @@ pub fn create_globals<'gc>(
         Value::Object(key::create_key_object(
             gc_context,
             Some(object_proto),
-            Some(function_proto),
+            function_proto,
             broadcaster_functions,
             array_proto,
         )),
@@ -1102,115 +1125,8 @@ pub fn create_globals<'gc>(
         )),
         Attribute::DONT_ENUM,
     );
-    globals.force_set_function(
-        "isFinite",
-        is_finite,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "isNaN",
-        is_nan,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "parseInt",
-        parse_int,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "parseFloat",
-        parse_float,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "random",
-        random,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "ASSetPropFlags",
-        object::as_set_prop_flags,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "clearInterval",
-        clear_interval,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "setInterval",
-        set_interval,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "setTimeout",
-        set_timeout,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "updateAfterEvent",
-        update_after_event,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "escape",
-        escape,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
-    globals.force_set_function(
-        "unescape",
-        unescape,
-        gc_context,
-        Attribute::DONT_ENUM,
-        Some(function_proto),
-    );
 
-    globals.add_property(
-        gc_context,
-        "NaN",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(get_nan),
-            Some(function_proto),
-            function_proto,
-        ),
-        None,
-        Attribute::DONT_ENUM,
-    );
-    globals.add_property(
-        gc_context,
-        "Infinity",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(get_infinity),
-            Some(function_proto),
-            function_proto,
-        ),
-        None,
-        Attribute::DONT_ENUM,
-    );
+    define_properties_on(GLOBAL_DECLS, gc_context, globals, function_proto);
 
     (
         SystemPrototypes {
@@ -1225,6 +1141,7 @@ pub fn create_globals<'gc>(
             array: array_proto,
             array_constructor: array,
             xml_node: xmlnode_proto,
+            xml_constructor: xml,
             string: string_proto,
             number: number_proto,
             boolean: boolean_proto,
@@ -1265,6 +1182,7 @@ pub fn create_globals<'gc>(
             gradient_glow_filter: gradient_glow_filter_proto,
             gradient_glow_filter_constructor: gradient_glow_filter,
             date: date_proto,
+            date_constructor: date,
             bitmap_data: bitmap_data_proto,
             bitmap_data_constructor: bitmap_data,
             video: video_proto,
@@ -1406,6 +1324,9 @@ mod tests {
             ["0"] => 0.0,
             ["1"] => 1.0,
             ["Infinity"] => f64::NAN,
+            ["-Infinity"] => f64::NAN,
+            ["inf"]  => f64::NAN,
+            ["-inf"]  => f64::NAN,
             ["100a"] => f64::NAN,
             ["0xhello"] => f64::NAN,
             ["123e-1"] => 12.3,

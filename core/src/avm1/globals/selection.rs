@@ -1,10 +1,19 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::globals::as_broadcaster::BroadcasterFunctions;
-use crate::avm1::property::Attribute;
+use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TDisplayObject, TObject, Value};
 use crate::display_object::{EditText, TextSelection};
 use gc_arena::MutationContext;
+
+const OBJECT_DECLS: &[Declaration] = declare_properties! {
+    "getBeginIndex" => method(get_begin_index; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getEndIndex" => method(get_end_index; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getCaretIndex" => method(get_caret_index; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "setSelection" => method(set_selection; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "setFocus" => method(set_focus; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getFocus" => method(get_focus; DONT_ENUM | DONT_DELETE | READ_ONLY);
+};
 
 pub fn get_begin_index<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
@@ -18,9 +27,9 @@ pub fn get_begin_index<'gc>(
         .and_then(|o| o.as_edit_text())
         .and_then(EditText::selection)
     {
-        Ok(Value::Number(selection.start() as f64))
+        Ok(selection.start().into())
     } else {
-        Ok(Value::Number(-1.0))
+        Ok((-1).into())
     }
 }
 
@@ -36,9 +45,9 @@ pub fn get_end_index<'gc>(
         .and_then(|o| o.as_edit_text())
         .and_then(EditText::selection)
     {
-        Ok(Value::Number(selection.end() as f64))
+        Ok(selection.end().into())
     } else {
-        Ok(Value::Number(-1.0))
+        Ok((-1).into())
     }
 }
 
@@ -54,9 +63,9 @@ pub fn get_caret_index<'gc>(
         .and_then(|o| o.as_edit_text())
         .and_then(EditText::selection)
     {
-        Ok(Value::Number(selection.to() as f64))
+        Ok(selection.to().into())
     } else {
-        Ok(Value::Number(-1.0))
+        Ok((-1).into())
     }
 }
 
@@ -79,15 +88,15 @@ pub fn set_selection<'gc>(
             .get(0)
             .map(|v| v.coerce_to_i32(activation))
             .transpose()?
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(0);
         let end = args
             .get(1)
             .map(|v| v.coerce_to_i32(activation))
             .transpose()?
-            .unwrap_or(i32::max_value());
-        let start = if start < 0 { 0 } else { start as usize };
-        let end = if end < 0 { 0 } else { end as usize };
-        let selection = TextSelection::for_range(start, end);
+            .unwrap_or(i32::MAX)
+            .max(0);
+        let selection = TextSelection::for_range(start as usize, end as usize);
         edit_box.set_selection(Some(selection), activation.context.gc_context);
     }
     Ok(Value::Undefined)
@@ -112,7 +121,7 @@ pub fn set_focus<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let tracker = activation.context.focus_tracker;
     match args.get(0) {
-        Some(Value::Null) | Some(Value::Undefined) => {
+        Some(Value::Undefined | Value::Null) => {
             tracker.set(None, &mut activation.context);
             Ok(true.into())
         }
@@ -139,58 +148,9 @@ pub fn create_selection_object<'gc>(
     broadcaster_functions: BroadcasterFunctions<'gc>,
     array_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let mut object = ScriptObject::object(gc_context, Some(proto));
-
+    let object = ScriptObject::object(gc_context, Some(proto));
     broadcaster_functions.initialize(gc_context, object.into(), array_proto);
-
-    object.force_set_function(
-        "getBeginIndex",
-        get_begin_index,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "getEndIndex",
-        get_end_index,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "getCaretIndex",
-        get_caret_index,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "setSelection",
-        set_selection,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "setFocus",
-        set_focus,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "getFocus",
-        get_focus,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
+    define_properties_on(OBJECT_DECLS, gc_context, object, fn_proto);
     object.into()
 }
 

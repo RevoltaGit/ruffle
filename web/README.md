@@ -50,12 +50,12 @@ For the compiler to be able to output WebAssembly, an additional target has to b
 
 Follow the instructions [to install node.js](https://nodejs.org/en/) on your machine.
 
-We recommend using the currently active LTS 12, but we do also run tests with maintenance LTS 10.
+We recommend using the currently active LTS 14, but we do also run tests with maintenance LTS 12.
 
 #### wasm-bindgen
 
 <!-- Be sure to also update the wasm-bindgen-cli version in .github/workflows/*.yaml and web/Cargo.toml -->
-This can be installed with `cargo install wasm-bindgen-cli --version 0.2.69`. Be sure to install this specific version of `wasm-bindgen-cli` to match the version used by Ruffle.
+This can be installed with `cargo install wasm-bindgen-cli --version 0.2.73`. Be sure to install this specific version of `wasm-bindgen-cli` to match the version used by Ruffle.
 
 #### Binaryen
 
@@ -81,7 +81,7 @@ In this project, you may run the following commands to build all packages:
     -   This will build the wasm binary and every node package (notably selfhosted and extension).
     -   Output will be available in the `dist/` of each package (for example, `./packages/selfhosted/dist`),
         save for the extension which is directory `build/`.
-    -   You may also use `npm run build:avm_debug` to activate the (extremely verbose) actionscript debugging output
+    -   You may also use `npm run build:debug` to disable Webpack optimizations and activate the (extremely verbose) ActionScript debugging output.
 
 From here, you may follow the instructions to [use Ruffle on your website](packages/selfhosted/README.md),
 or run a demo locally with `npm run demo`.

@@ -2,10 +2,9 @@
 
 use crate::avm1::{Object as Avm1Object, StageObject as Avm1StageObject};
 use crate::avm2::{Object as Avm2Object, StageObject as Avm2StageObject};
-use crate::backend::render::BitmapHandle;
+use crate::backend::render::BitmapInfo;
 use crate::backend::video::{EncodedFrame, VideoStreamHandle};
 use crate::bounding_box::BoundingBox;
-use crate::collect::CollectWrapper;
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{DisplayObjectBase, TDisplayObject};
 use crate::prelude::*;
@@ -40,7 +39,8 @@ pub struct VideoData<'gc> {
     stream: VideoStream,
 
     /// The last decoded frame in the video stream.
-    decoded_frame: Option<(u32, CollectWrapper<BitmapHandle>)>,
+    #[collect(require_static)]
+    decoded_frame: Option<(u32, BitmapInfo)>,
 
     /// AVM representation of this video player.
     object: Option<AvmObject<'gc>>,
@@ -248,11 +248,10 @@ impl<'gc> Video<'gc> {
                     context
                         .video
                         .decode_video_stream_frame(*stream, encframe, context.renderer)
-                        .map(|bi| bi.handle)
                 }
                 None => {
-                    if let Some((_old_id, old_frame)) = &read.decoded_frame {
-                        Ok(old_frame.0)
+                    if let Some((_old_id, old_frame)) = read.decoded_frame {
+                        Ok(old_frame)
                     } else {
                         Err(Box::from(format!(
                             "Attempted to seek to omitted frame {} without prior decoded frame",
@@ -267,8 +266,7 @@ impl<'gc> Video<'gc> {
 
         match res {
             Ok(bitmap) => {
-                self.0.write(context.gc_context).decoded_frame =
-                    Some((frame_id, CollectWrapper(bitmap)));
+                self.0.write(context.gc_context).decoded_frame = Some((frame_id, bitmap));
             }
             Err(e) => log::error!("Got error when seeking to video frame {}: {}", frame_id, e),
         }
@@ -290,6 +288,12 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         _instantiated_by: Instantiator,
         run_frame: bool,
     ) {
+        if self.avm_type() == AvmType::Avm1 {
+            context
+                .avm1
+                .add_to_exec_list(context.gc_context, (*self).into());
+        }
+
         let mut write = self.0.write(context.gc_context);
 
         let (stream, movie, keyframes) = match &*write.source.read() {
@@ -375,7 +379,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
     }
 
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        let vm_type = self.vm_type(context);
+        let vm_type = self.avm_type();
         if vm_type == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
             let object: Avm2Object<'_> = Avm2StageObject::for_display_object(
                 context.gc_context,
@@ -407,7 +411,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
     }
 
     fn render(&self, context: &mut RenderContext) {
-        if !self.world_bounds().intersects(&context.view_bounds) {
+        if !self.world_bounds().intersects(&context.stage.view_bounds()) {
             // Off-screen; culled
             return;
         }
@@ -415,13 +419,27 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         context.transform_stack.push(&*self.transform());
 
         if let Some((_frame_id, ref bitmap)) = self.0.read().decoded_frame {
+            let mut transform = context.transform_stack.transform().clone();
+            let bounds = self.self_bounds();
+
+            // The actual decoded frames might be different in size than the declared
+            // bounds of the VideoStream tag, so a final scale adjustment has to be done.
+            transform.matrix *= Matrix::scale(
+                bounds.width().to_pixels() as f32 / bitmap.width as f32,
+                bounds.height().to_pixels() as f32 / bitmap.height as f32,
+            );
+
             context
                 .renderer
-                .render_bitmap(bitmap.0, context.transform_stack.transform(), false);
+                .render_bitmap(bitmap.handle, &transform, false);
         } else {
             log::warn!("Video has no decoded frame to render.");
         }
 
         context.transform_stack.pop();
+    }
+
+    fn set_object2(&mut self, mc: MutationContext<'gc, '_>, to: Avm2Object<'gc>) {
+        self.0.write(mc).object = Some(to.into());
     }
 }

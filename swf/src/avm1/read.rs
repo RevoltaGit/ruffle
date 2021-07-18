@@ -1,12 +1,10 @@
-#![allow(clippy::unreadable_literal)]
-
 use crate::avm1::{opcode::OpCode, types::*};
 use crate::error::{Error, Result};
 use crate::extensions::ReadSwfExt;
 
-#[allow(dead_code)]
 pub struct Reader<'a> {
     input: &'a [u8],
+    #[allow(dead_code)]
     version: u8,
 }
 
@@ -18,7 +16,7 @@ impl<'a> ReadSwfExt<'a> for Reader<'a> {
 
     #[inline(always)]
     fn as_slice(&self) -> &'a [u8] {
-        &self.input
+        self.input
     }
 }
 
@@ -41,6 +39,13 @@ impl<'a> Reader<'a> {
     #[inline]
     pub fn get_mut(&mut self) -> &mut &'a [u8] {
         &mut self.input
+    }
+
+    #[inline]
+    fn read_f64_me(&mut self) -> Result<f64> {
+        // Flash weirdly stores (some?) f64 as two LE 32-bit chunks.
+        // First word is the hi-word, second word is the lo-word.
+        Ok(f64::from_bits(self.read_u64()?.rotate_left(32)))
     }
 
     #[inline]
@@ -68,7 +73,7 @@ impl<'a> Reader<'a> {
     pub fn read_opcode_and_length(&mut self) -> Result<(u8, usize)> {
         let opcode = self.read_u8()?;
         let length = if opcode >= 0x80 {
-            self.read_u16()? as usize
+            self.read_u16()?.into()
         } else {
             0
         };
@@ -81,7 +86,6 @@ impl<'a> Reader<'a> {
     /// The `length` passed in should be the length excluding any sub-blocks.
     /// The final `length` returned will be total length of the action, including sub-blocks.
     #[inline]
-    #[allow(clippy::inconsistent_digit_grouping)]
     fn read_op(&mut self, opcode: u8, length: &mut usize) -> Result<Option<Action<'a>>> {
         use num_traits::FromPrimitive;
         let action = if let Some(op) = OpCode::from_u8(opcode) {
@@ -232,7 +236,7 @@ impl<'a> Reader<'a> {
                     num_actions_to_skip: self.read_u8()?,
                 },
                 OpCode::With => {
-                    let code_length = usize::from(self.read_u16()?);
+                    let code_length: usize = (self.read_u16()?).into();
                     *length += code_length;
                     Action::With {
                         actions: self.read_slice(code_length)?,
@@ -290,7 +294,7 @@ impl<'a> Reader<'a> {
             params.push(self.read_str()?);
         }
         // code_length isn't included in the DefineFunction's action length.
-        let code_length = usize::from(self.read_u16()?);
+        let code_length: usize = (self.read_u16()?).into();
         *action_length += code_length;
         Ok(Action::DefineFunction {
             name,
@@ -302,8 +306,8 @@ impl<'a> Reader<'a> {
     fn read_define_function_2(&mut self, action_length: &mut usize) -> Result<Action<'a>> {
         let name = self.read_str()?;
         let num_params = self.read_u16()?;
-        let register_count = self.read_u8()?; // Number of registers
-        let flags = self.read_u16()?;
+        let register_count = self.read_u8()?;
+        let flags = FunctionFlags::from_bits_truncate(self.read_u16()?);
         let mut params = Vec::with_capacity(num_params as usize);
         for _ in 0..num_params {
             let register = self.read_u8()?;
@@ -313,30 +317,22 @@ impl<'a> Reader<'a> {
             });
         }
         // code_length isn't included in the DefineFunction's length.
-        let code_length = usize::from(self.read_u16()?);
+        let code_length: usize = (self.read_u16()?).into();
         *action_length += code_length;
         Ok(Action::DefineFunction2(Function {
             name,
             params,
             register_count,
-            preload_global: flags & 0b1_00000000 != 0,
-            preload_parent: flags & 0b10000000 != 0,
-            preload_root: flags & 0b1000000 != 0,
-            suppress_super: flags & 0b100000 != 0,
-            preload_super: flags & 0b10000 != 0,
-            suppress_arguments: flags & 0b1000 != 0,
-            preload_arguments: flags & 0b100 != 0,
-            suppress_this: flags & 0b10 != 0,
-            preload_this: flags & 0b1 != 0,
+            flags,
             actions: self.read_slice(code_length)?,
         }))
     }
 
     fn read_try(&mut self, length: &mut usize) -> Result<Action<'a>> {
         let flags = self.read_u8()?;
-        let try_length = usize::from(self.read_u16()?);
-        let catch_length = usize::from(self.read_u16()?);
-        let finally_length = usize::from(self.read_u16()?);
+        let try_length: usize = (self.read_u16()?).into();
+        let catch_length: usize = (self.read_u16()?).into();
+        let finally_length: usize = (self.read_u16()?).into();
         *length += try_length + catch_length + finally_length;
         let catch_var = if flags & 0b100 == 0 {
             CatchVar::Var(self.read_str()?)

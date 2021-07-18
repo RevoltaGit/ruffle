@@ -6,9 +6,18 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::property::Attribute;
+use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
 use crate::display_object::{DisplayObject, TDisplayObject};
 use gc_arena::MutationContext;
+use swf::Fixed8;
+
+const PROTO_DECLS: &[Declaration] = declare_properties! {
+    "getRGB" => method(get_rgb; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getTransform" => method(get_transform; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "setRGB" => method(set_rgb; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "setTransform" => method(set_transform; DONT_ENUM | DONT_DELETE | READ_ONLY);
+};
 
 pub fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
@@ -34,40 +43,8 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let mut object = ScriptObject::object(gc_context, Some(proto));
-
-    object.force_set_function(
-        "getRGB",
-        get_rgb,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "getTransform",
-        get_transform,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "setRGB",
-        set_rgb,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "setTransform",
-        set_transform,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
+    let object = ScriptObject::object(gc_context, Some(proto));
+    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     object.into()
 }
 
@@ -96,9 +73,9 @@ fn get_rgb<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(target) = target(activation, this)? {
         let color_transform = target.color_transform();
-        let r = ((color_transform.r_add * 255.0) as i32) << 16;
-        let g = ((color_transform.g_add * 255.0) as i32) << 8;
-        let b = (color_transform.b_add * 255.0) as i32;
+        let r = ((color_transform.r_add) as i32) << 16;
+        let g = ((color_transform.g_add) as i32) << 8;
+        let b = (color_transform.b_add) as i32;
         Ok((r | g | b).into())
     } else {
         Ok(Value::Undefined)
@@ -116,14 +93,30 @@ fn get_transform<'gc>(
             activation.context.gc_context,
             Some(activation.context.avm1.prototypes.object),
         );
-        out.set("ra", (color_transform.r_mult * 100.0).into(), activation)?;
-        out.set("ga", (color_transform.g_mult * 100.0).into(), activation)?;
-        out.set("ba", (color_transform.b_mult * 100.0).into(), activation)?;
-        out.set("aa", (color_transform.a_mult * 100.0).into(), activation)?;
-        out.set("rb", (color_transform.r_add * 255.0).into(), activation)?;
-        out.set("gb", (color_transform.g_add * 255.0).into(), activation)?;
-        out.set("bb", (color_transform.b_add * 255.0).into(), activation)?;
-        out.set("ab", (color_transform.a_add * 255.0).into(), activation)?;
+        out.set(
+            "ra",
+            (color_transform.r_mult.to_f64() * 100.0).into(),
+            activation,
+        )?;
+        out.set(
+            "ga",
+            (color_transform.g_mult.to_f64() * 100.0).into(),
+            activation,
+        )?;
+        out.set(
+            "ba",
+            (color_transform.b_mult.to_f64() * 100.0).into(),
+            activation,
+        )?;
+        out.set(
+            "aa",
+            (color_transform.a_mult.to_f64() * 100.0).into(),
+            activation,
+        )?;
+        out.set("rb", color_transform.r_add.into(), activation)?;
+        out.set("gb", color_transform.g_add.into(), activation)?;
+        out.set("bb", color_transform.b_add.into(), activation)?;
+        out.set("ab", color_transform.a_add.into(), activation)?;
         Ok(out.into())
     } else {
         Ok(Value::Undefined)
@@ -137,21 +130,20 @@ fn set_rgb<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(target) = target(activation, this)? {
         target.set_transformed_by_script(activation.context.gc_context, true);
-        let mut color_transform = target.color_transform_mut(activation.context.gc_context);
+
         let rgb = args
             .get(0)
             .unwrap_or(&Value::Undefined)
-            .coerce_to_f64(activation)? as i32;
-        let r = (((rgb >> 16) & 0xff) as f32) / 255.0;
-        let g = (((rgb >> 8) & 0xff) as f32) / 255.0;
-        let b = ((rgb & 0xff) as f32) / 255.0;
+            .coerce_to_i32(activation)? as i32;
+        let [b, g, r, _] = rgb.to_le_bytes();
 
-        color_transform.r_mult = 0.0;
-        color_transform.g_mult = 0.0;
-        color_transform.b_mult = 0.0;
-        color_transform.r_add = r;
-        color_transform.g_add = g;
-        color_transform.b_add = b;
+        let mut color_transform = target.color_transform_mut(activation.context.gc_context);
+        color_transform.r_mult = Fixed8::ZERO;
+        color_transform.g_mult = Fixed8::ZERO;
+        color_transform.b_mult = Fixed8::ZERO;
+        color_transform.r_add = r.into();
+        color_transform.g_add = g.into();
+        color_transform.b_add = b.into();
     }
     Ok(Value::Undefined)
 }
@@ -161,21 +153,20 @@ fn set_transform<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    // TODO: These map from the 0-100% range for mult and the -255-255 range for addition used by ActionScript
-    // to the 16-bit range used by the internal representations of the Flash Player.
-    // This will get slightly simpler when we change ColorTransform to the proper representation (see #193).
     fn set_color_mult<'gc>(
         activation: &mut Activation<'_, 'gc, '_>,
         transform: Object<'gc>,
         property: &str,
-        out: &mut f32,
+        out: &mut Fixed8,
     ) -> Result<(), Error<'gc>> {
         // The parameters are set only if the property exists on the object itself (prototype excluded).
         if transform.has_own_property(activation, property) {
             let n = transform
                 .get(property, activation)?
                 .coerce_to_f64(activation)?;
-            *out = f32::from(crate::ecma_conversions::f64_to_wrapping_i16(n * 2.56)) / 256.0
+            *out = Fixed8::from_bits(crate::ecma_conversions::f64_to_wrapping_i16(
+                n * 256.0 / 100.0,
+            ));
         }
         Ok(())
     }
@@ -184,14 +175,13 @@ fn set_transform<'gc>(
         activation: &mut Activation<'_, 'gc, '_>,
         transform: Object<'gc>,
         property: &str,
-        out: &mut f32,
+        out: &mut i16,
     ) -> Result<(), Error<'gc>> {
         // The parameters are set only if the property exists on the object itself (prototype excluded).
         if transform.has_own_property(activation, property) {
-            let n = transform
+            *out = transform
                 .get(property, activation)?
-                .coerce_to_f64(activation)?;
-            *out = f32::from(crate::ecma_conversions::f64_to_wrapping_i16(n)) / 255.0
+                .coerce_to_i16(activation)?;
         }
         Ok(())
     }

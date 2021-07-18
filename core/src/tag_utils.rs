@@ -1,9 +1,9 @@
 use crate::backend::navigator::url_from_relative_path;
-use crate::property_map::PropertyMap;
+use crate::vminterface::AvmType;
 use gc_arena::Collect;
 use std::path::Path;
 use std::sync::Arc;
-use swf::{Header, TagCode};
+use swf::{Fixed8, HeaderExt, Rectangle, TagCode, Twips};
 
 pub type Error = Box<dyn std::error::Error>;
 pub type DecodeResult = Result<(), Error>;
@@ -15,7 +15,7 @@ pub type SwfStream<'a> = swf::read::Reader<'a>;
 #[collect(require_static)]
 pub struct SwfMovie {
     /// The SWF header parsed from the data stream.
-    header: Header,
+    header: HeaderExt,
 
     /// Uncompressed SWF data.
     data: Vec<u8>,
@@ -26,51 +26,28 @@ pub struct SwfMovie {
     /// The URL that triggered the SWF load.
     loader_url: Option<String>,
 
-    /// Any parameters provided when loading this movie (also known as 'flashvars')
-    parameters: PropertyMap<String>,
+    /// Any parameters provided when loading this movie (also known as 'flashvars'),
+    /// as a list of key-value pairs.
+    parameters: Vec<(String, String)>,
 
     /// The suggest encoding for this SWF.
     encoding: &'static swf::Encoding,
 
     /// The compressed length of the entire datastream
-    compressed_length: usize,
+    compressed_len: usize,
 }
 
 impl SwfMovie {
     /// Construct an empty movie.
     pub fn empty(swf_version: u8) -> Self {
         Self {
-            header: Header {
-                compression: swf::Compression::None,
-                version: swf_version,
-                uncompressed_length: 0,
-                stage_size: swf::Rectangle::default(),
-                frame_rate: 1.0,
-                num_frames: 0,
-            },
+            header: HeaderExt::default_with_swf_version(swf_version),
             data: vec![],
             url: None,
             loader_url: None,
-            parameters: PropertyMap::new(),
+            parameters: Vec::new(),
             encoding: swf::UTF_8,
-            compressed_length: 0,
-        }
-    }
-
-    /// Construct a movie from an existing movie with any particular data on
-    /// it.
-    ///
-    /// Use of this method is discouraged. SWF data should be borrowed or
-    /// sliced as necessary to refer to partial sections of a file.
-    pub fn from_movie_and_subdata(&self, data: Vec<u8>, source: &SwfMovie) -> Self {
-        Self {
-            header: self.header.clone(),
-            data,
-            url: source.url.clone(),
-            loader_url: source.loader_url.clone(),
-            parameters: source.parameters.clone(),
-            encoding: source.encoding,
-            compressed_length: source.compressed_length,
+            compressed_len: 0,
         }
     }
 
@@ -79,7 +56,7 @@ impl SwfMovie {
         let mut url = path.as_ref().to_string_lossy().to_owned().to_string();
         let cwd = std::env::current_dir()?;
         if let Ok(abs_url) = url_from_relative_path(cwd, &url) {
-            url = abs_url.into_string();
+            url = abs_url.into();
         }
 
         let data = std::fs::read(path)?;
@@ -92,27 +69,27 @@ impl SwfMovie {
         url: Option<String>,
         loader_url: Option<String>,
     ) -> Result<Self, Error> {
-        let compressed_length = swf_data.len();
+        let compressed_len = swf_data.len();
         let swf_buf = swf::read::decompress_swf(swf_data)?;
-        let encoding = swf::SwfStr::encoding_for_version(swf_buf.header.version);
+        let encoding = swf::SwfStr::encoding_for_version(swf_buf.header.version());
         Ok(Self {
             header: swf_buf.header,
             data: swf_buf.data,
             url,
             loader_url,
-            parameters: PropertyMap::new(),
+            parameters: Vec::new(),
             encoding,
-            compressed_length,
+            compressed_len,
         })
     }
 
-    pub fn header(&self) -> &Header {
+    pub fn header(&self) -> &HeaderExt {
         &self.header
     }
 
     /// Get the version of the SWF.
     pub fn version(&self) -> u8 {
-        self.header.version
+        self.header.version()
     }
 
     pub fn data(&self) -> &[u8] {
@@ -127,12 +104,14 @@ impl SwfMovie {
         self.encoding
     }
 
-    pub fn width(&self) -> u32 {
-        (self.header.stage_size.x_max - self.header.stage_size.x_min).to_pixels() as u32
+    /// The width of the movie in twips.
+    pub fn width(&self) -> Twips {
+        self.header.stage_size().x_max - self.header.stage_size().x_min
     }
 
-    pub fn height(&self) -> u32 {
-        (self.header.stage_size.y_max - self.header.stage_size.y_min).to_pixels() as u32
+    /// The height of the movie in twips.
+    pub fn height(&self) -> Twips {
+        self.header.stage_size().y_max - self.header.stage_size().y_min
     }
 
     /// Get the URL this SWF was fetched from.
@@ -145,16 +124,40 @@ impl SwfMovie {
         self.loader_url.as_deref()
     }
 
-    pub fn parameters(&self) -> &PropertyMap<String> {
+    pub fn parameters(&self) -> &[(String, String)] {
         &self.parameters
     }
 
-    pub fn parameters_mut(&mut self) -> &mut PropertyMap<String> {
-        &mut self.parameters
+    pub fn append_parameters(&mut self, params: impl IntoIterator<Item = (String, String)>) {
+        self.parameters.extend(params);
     }
 
-    pub fn compressed_length(&self) -> usize {
-        self.compressed_length
+    pub fn compressed_len(&self) -> usize {
+        self.compressed_len
+    }
+
+    pub fn uncompressed_len(&self) -> u32 {
+        self.header.uncompressed_len()
+    }
+
+    pub fn avm_type(&self) -> AvmType {
+        if self.header.is_action_script_3() {
+            AvmType::Avm2
+        } else {
+            AvmType::Avm1
+        }
+    }
+
+    pub fn stage_size(&self) -> &Rectangle {
+        self.header.stage_size()
+    }
+
+    pub fn num_frames(&self) -> u16 {
+        self.header.num_frames()
+    }
+
+    pub fn frame_rate(&self) -> Fixed8 {
+        self.header.frame_rate()
     }
 }
 
@@ -201,12 +204,12 @@ impl SwfSlice {
     ///
     /// This function returns None if the given slice is not a subslice of the
     /// current slice.
-    pub fn to_subslice(&self, slice: &[u8]) -> Option<SwfSlice> {
+    pub fn to_subslice(&self, slice: &[u8]) -> Option<Self> {
         let self_pval = self.movie.data().as_ptr() as usize;
         let slice_pval = slice.as_ptr() as usize;
 
         if (self_pval + self.start) <= slice_pval && slice_pval < (self_pval + self.end) {
-            Some(SwfSlice {
+            Some(Self {
                 movie: self.movie.clone(),
                 start: slice_pval - self_pval,
                 end: (slice_pval - self_pval) + slice.len(),
@@ -220,13 +223,13 @@ impl SwfSlice {
     ///
     /// This function allows subslices outside the current slice to be formed,
     /// as long as they are valid subslices of the movie itself.
-    pub fn to_unbounded_subslice(&self, slice: &[u8]) -> Option<SwfSlice> {
+    pub fn to_unbounded_subslice(&self, slice: &[u8]) -> Option<Self> {
         let self_pval = self.movie.data().as_ptr() as usize;
         let self_len = self.movie.data().len();
         let slice_pval = slice.as_ptr() as usize;
 
         if self_pval <= slice_pval && slice_pval < (self_pval + self_len) {
-            Some(SwfSlice {
+            Some(Self {
                 movie: self.movie.clone(),
                 start: slice_pval - self_pval,
                 end: (slice_pval - self_pval) + slice.len(),
@@ -246,7 +249,7 @@ impl SwfSlice {
     /// If the resulting slice would be outside the bounds of the underlying
     /// movie, or the given reader refers to a different underlying movie, this
     /// function returns None.
-    pub fn resize_to_reader(&self, reader: &mut SwfStream<'_>, size: usize) -> Option<SwfSlice> {
+    pub fn resize_to_reader(&self, reader: &mut SwfStream<'_>, size: usize) -> Option<Self> {
         if self.movie.data().as_ptr() as usize <= reader.get_ref().as_ptr() as usize
             && (reader.get_ref().as_ptr() as usize)
                 < self.movie.data().as_ptr() as usize + self.movie.data().len()
@@ -259,7 +262,7 @@ impl SwfSlice {
             let len = self.movie.data().len();
 
             if new_start < len && new_end < len {
-                Some(SwfSlice {
+                Some(Self {
                     movie: self.movie.clone(),
                     start: new_start,
                     end: new_end,
@@ -278,12 +281,12 @@ impl SwfSlice {
     /// Furthermore, this function will yield None if the calculated slice
     /// would be invalid (e.g. negative length) or would extend past the end of
     /// the current slice.
-    pub fn to_start_and_end(&self, start: usize, end: usize) -> Option<SwfSlice> {
+    pub fn to_start_and_end(&self, start: usize, end: usize) -> Option<Self> {
         let new_start = self.start + start;
         let new_end = self.start + end;
 
         if new_start <= new_end {
-            self.to_subslice(&self.movie.data().get(new_start..new_end)?)
+            self.to_subslice(self.movie.data().get(new_start..new_end)?)
         } else {
             None
         }
@@ -296,7 +299,7 @@ impl SwfSlice {
 
     /// Get the version of the SWF this data comes from.
     pub fn version(&self) -> u8 {
-        self.movie.header().version
+        self.movie.header().version()
     }
 
     /// Construct a reader for this slice.
@@ -311,7 +314,7 @@ pub fn decode_tags<'a, F>(
     reader: &mut SwfStream<'a>,
     mut tag_callback: F,
     stop_tag: TagCode,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<(), Error>
 where
     F: for<'b> FnMut(&'b mut SwfStream<'a>, TagCode, usize) -> DecodeResult,
 {
@@ -323,10 +326,9 @@ where
             break;
         }
 
-        let tag = TagCode::from_u16(tag_code);
         let tag_slice = &reader.get_ref()[..tag_len];
         let end_slice = &reader.get_ref()[tag_len..];
-        if let Some(tag) = tag {
+        if let Some(tag) = TagCode::from_u16(tag_code) {
             *reader.get_mut() = tag_slice;
             let result = tag_callback(reader, tag, tag_len);
 

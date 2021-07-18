@@ -2,11 +2,9 @@
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::function::{Executable, FunctionObject};
-use crate::avm1::object::script_object::ScriptObject;
 use crate::avm1::object::xml_object::XmlObject;
-use crate::avm1::property::Attribute;
-use crate::avm1::{AvmString, Object, TObject, Value};
+use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::{ArrayObject, AvmString, Object, TObject, Value};
 use crate::avm_warn;
 use crate::backend::navigator::RequestOptions;
 use crate::xml;
@@ -29,13 +27,52 @@ pub const XML_ATTRIBUTE_NOT_TERMINATED: f64 = -8.0;
 pub const XML_MISMATCHED_START: f64 = -9.0;
 pub const XML_MISMATCHED_END: f64 = -10.0;
 
+const XMLNODE_PROTO_DECLS: &[Declaration] = declare_properties! {
+    "localName" => property(xmlnode_local_name; READ_ONLY);
+    "nodeName" => property(xmlnode_node_name; READ_ONLY);
+    "nodeType" => property(xmlnode_node_type; READ_ONLY);
+    "nodeValue" => property(xmlnode_node_value; READ_ONLY);
+    "prefix" => property(xmlnode_prefix; READ_ONLY);
+    "childNodes" => property(xmlnode_child_nodes; READ_ONLY);
+    "firstChild" => property(xmlnode_first_child; READ_ONLY);
+    "lastChild" => property(xmlnode_last_child; READ_ONLY);
+    "parentNode" => property(xmlnode_parent_node; READ_ONLY);
+    "previousSibling" => property(xmlnode_previous_sibling; READ_ONLY);
+    "nextSibling" => property(xmlnode_next_sibling; READ_ONLY);
+    "attributes" => property(xmlnode_attributes; READ_ONLY);
+    "namespaceURI" => property(xmlnode_namespace_uri; READ_ONLY);
+    "appendChild" => method(xmlnode_append_child);
+    "insertBefore" => method(xmlnode_insert_before);
+    "cloneNode" => method(xmlnode_clone_node);
+    "getNamespaceForPrefix" => method(xmlnode_get_namespace_for_prefix);
+    "getPrefixForNamespace" => method(xmlnode_get_prefix_for_namespace);
+    "hasChildNodes" => method(xmlnode_has_child_nodes);
+    "removeNode" => method(xmlnode_remove_node);
+    "toString" => method(xmlnode_to_string);
+};
+
+const XML_PROTO_DECLS: &[Declaration] = declare_properties! {
+    "docTypeDecl" => property(xml_doc_type_decl; READ_ONLY);
+    "ignoreWhite" => bool(false);
+    "contentType" => string("application/x-www-form-urlencoded"; READ_ONLY);
+    "xmlDecl" => property(xml_xml_decl; READ_ONLY);
+    "idMap" => property(xml_id_map; READ_ONLY);
+    "status" => property(xml_status; READ_ONLY);
+    "createElement" => method(xml_create_element);
+    "createTextNode" => method(xml_create_text_node);
+    "parseXML" => method(xml_parse_xml);
+    "load" => method(xml_load);
+    "sendAndLoad" => method(xml_send_and_load);
+    "onData" => method(xml_on_data);
+};
+
 /// Returns true if a particular node can or cannot be exposed to AVM1.
 ///
 /// Our internal XML tree representation supports node types that AVM1 XML did
 /// not. Those nodes are filtered from all attributes that return XML nodes to
 /// act as if those nodes did not exist. For example, `prevSibling` skips
 /// past incompatible nodes, etc.
-fn is_as2_compatible(node: XmlNode<'_>) -> bool {
+fn is_as2_compatible(node: &XmlNode<'_>) -> bool {
     node.is_document_root() || node.is_element() || node.is_text()
 }
 
@@ -137,15 +174,17 @@ pub fn xmlnode_clone_node<'gc>(
     if let (Some(xmlnode), deep) = (
         this.as_xml_node(),
         args.get(0)
-            .map(|v| v.as_bool(activation.current_swf_version()))
+            .map(|v| v.as_bool(activation.swf_version()))
             .unwrap_or(false),
     ) {
         let mut clone_node = xmlnode.duplicate(activation.context.gc_context, deep);
 
-        return Ok(Value::Object(clone_node.script_object(
-            activation.context.gc_context,
-            Some(activation.context.avm1.prototypes.xml_node),
-        )));
+        return Ok(clone_node
+            .script_object(
+                activation.context.gc_context,
+                Some(activation.context.avm1.prototypes.xml_node),
+            )
+            .into());
     }
 
     Ok(Value::Undefined)
@@ -319,32 +358,19 @@ pub fn xmlnode_child_nodes<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(node) = this.as_xml_node() {
-        let array = ScriptObject::array(
+        return Ok(ArrayObject::new(
             activation.context.gc_context,
-            Some(activation.context.avm1.prototypes.array),
-        );
-
-        let mut compatible_nodes = 0;
-        for mut child in node.children() {
-            if !is_as2_compatible(child) {
-                continue;
-            }
-
-            array.set_array_element(
-                compatible_nodes as usize,
+            activation.context.avm1.prototypes().array,
+            node.children().filter(is_as2_compatible).map(|mut child| {
                 child
                     .script_object(
                         activation.context.gc_context,
                         Some(activation.context.avm1.prototypes.xml_node),
                     )
-                    .into(),
-                activation.context.gc_context,
-            );
-
-            compatible_nodes += 1;
-        }
-
-        return Ok(array.into());
+                    .into()
+            }),
+        )
+        .into());
     }
 
     Ok(Value::Undefined)
@@ -359,7 +385,7 @@ pub fn xmlnode_first_child<'gc>(
         let mut children = node.children();
         let mut next = children.next();
         while let Some(my_next) = next {
-            if is_as2_compatible(my_next) {
+            if is_as2_compatible(&my_next) {
                 break;
             }
 
@@ -390,7 +416,7 @@ pub fn xmlnode_last_child<'gc>(
         let mut children = node.children();
         let mut prev = children.next_back();
         while let Some(my_prev) = prev {
-            if is_as2_compatible(my_prev) {
+            if is_as2_compatible(&my_prev) {
                 break;
             }
 
@@ -441,7 +467,7 @@ pub fn xmlnode_previous_sibling<'gc>(
     if let Some(node) = this.as_xml_node() {
         let mut prev = node.prev_sibling();
         while let Some(my_prev) = prev {
-            if is_as2_compatible(my_prev) {
+            if is_as2_compatible(&my_prev) {
                 break;
             }
 
@@ -470,7 +496,7 @@ pub fn xmlnode_next_sibling<'gc>(
     if let Some(node) = this.as_xml_node() {
         let mut next = node.next_sibling();
         while let Some(my_next) = next {
-            if is_as2_compatible(my_next) {
+            if is_as2_compatible(&my_next) {
                 break;
             }
 
@@ -534,244 +560,8 @@ pub fn create_xmlnode_proto<'gc>(
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     let xmlnode_proto = XmlObject::empty_node(gc_context, Some(proto));
-
-    xmlnode_proto.add_property(
-        gc_context,
-        "localName",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_local_name),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "nodeName",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_node_name),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "nodeType",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_node_type),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "nodeValue",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_node_value),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "prefix",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_prefix),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "childNodes",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_child_nodes),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "firstChild",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_first_child),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "lastChild",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_last_child),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "parentNode",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_parent_node),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "previousSibling",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_previous_sibling),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "nextSibling",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_next_sibling),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "attributes",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_attributes),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto.add_property(
-        gc_context,
-        "namespaceURI",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xmlnode_namespace_uri),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xmlnode_proto
-        .as_script_object()
-        .unwrap()
-        .force_set_function(
-            "appendChild",
-            xmlnode_append_child,
-            gc_context,
-            Attribute::empty(),
-            Some(fn_proto),
-        );
-    xmlnode_proto
-        .as_script_object()
-        .unwrap()
-        .force_set_function(
-            "insertBefore",
-            xmlnode_insert_before,
-            gc_context,
-            Attribute::empty(),
-            Some(fn_proto),
-        );
-    xmlnode_proto
-        .as_script_object()
-        .unwrap()
-        .force_set_function(
-            "cloneNode",
-            xmlnode_clone_node,
-            gc_context,
-            Attribute::empty(),
-            Some(fn_proto),
-        );
-    xmlnode_proto
-        .as_script_object()
-        .unwrap()
-        .force_set_function(
-            "getNamespaceForPrefix",
-            xmlnode_get_namespace_for_prefix,
-            gc_context,
-            Attribute::empty(),
-            Some(fn_proto),
-        );
-    xmlnode_proto
-        .as_script_object()
-        .unwrap()
-        .force_set_function(
-            "getPrefixForNamespace",
-            xmlnode_get_prefix_for_namespace,
-            gc_context,
-            Attribute::empty(),
-            Some(fn_proto),
-        );
-    xmlnode_proto
-        .as_script_object()
-        .unwrap()
-        .force_set_function(
-            "hasChildNodes",
-            xmlnode_has_child_nodes,
-            gc_context,
-            Attribute::empty(),
-            Some(fn_proto),
-        );
-    xmlnode_proto
-        .as_script_object()
-        .unwrap()
-        .force_set_function(
-            "removeNode",
-            xmlnode_remove_node,
-            gc_context,
-            Attribute::empty(),
-            Some(fn_proto),
-        );
-    xmlnode_proto
-        .as_script_object()
-        .unwrap()
-        .force_set_function(
-            "toString",
-            xmlnode_to_string,
-            gc_context,
-            Attribute::empty(),
-            Some(fn_proto),
-        );
-
+    let object = xmlnode_proto.as_script_object().unwrap();
+    define_properties_on(XMLNODE_PROTO_DECLS, gc_context, object, fn_proto);
     xmlnode_proto
 }
 
@@ -792,7 +582,7 @@ pub fn xml_constructor<'gc>(
             this_node.swap(activation.context.gc_context, xmlnode);
             let ignore_whitespace = this
                 .get("ignoreWhite", activation)?
-                .as_bool(activation.current_swf_version());
+                .as_bool(activation.swf_version());
 
             if let Err(e) = this_node.replace_with_str(
                 activation.context.gc_context,
@@ -901,7 +691,7 @@ pub fn xml_parse_xml<'gc>(
 
         let ignore_whitespace = this
             .get("ignoreWhite", activation)?
-            .as_bool(activation.current_swf_version());
+            .as_bool(activation.swf_version());
 
         let result = node.replace_with_str(
             activation.context.gc_context,
@@ -917,35 +707,43 @@ pub fn xml_parse_xml<'gc>(
     Ok(Value::Undefined)
 }
 
+pub fn xml_send_and_load<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Object<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let url_val = args.get(0).cloned().unwrap_or(Value::Undefined);
+
+    if let Value::Null = url_val {
+        return Ok(Value::Undefined);
+    }
+
+    let target = match args.get(1) {
+        Some(&Value::Object(o)) => o,
+        _ => return Ok(Value::Undefined),
+    };
+
+    if let Some(node) = this.as_xml_node() {
+        let url = url_val.coerce_to_string(activation)?;
+        spawn_xml_fetch(activation, this, target, &url, Some(node))?;
+    }
+    Ok(Value::Undefined)
+}
+
 pub fn xml_load<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let url = args.get(0).cloned().unwrap_or(Value::Undefined);
+    let url_val = args.get(0).cloned().unwrap_or(Value::Undefined);
 
-    if let Value::Null = url {
+    if let Value::Null = url_val {
         return Ok(false.into());
     }
 
-    if let Some(node) = this.as_xml_node() {
-        let url = url.coerce_to_string(activation)?;
-
-        this.set("loaded", false.into(), activation)?;
-
-        let fetch = activation
-            .context
-            .navigator
-            .fetch(&url, RequestOptions::get());
-        let target_clip = activation.target_clip_or_root()?;
-        let process = activation.context.load_manager.load_xml_into_node(
-            activation.context.player.clone().unwrap(),
-            node,
-            target_clip,
-            fetch,
-        );
-
-        activation.context.navigator.spawn_future(process);
+    if let Some(_node) = this.as_xml_node() {
+        let url = url_val.coerce_to_string(activation)?;
+        spawn_xml_fetch(activation, this, this, &url, None)?;
 
         Ok(true.into())
     } else {
@@ -1044,26 +842,73 @@ pub fn xml_status<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(node) = this.as_xml_node() {
-        return match node.document().last_parse_error() {
-            None => Ok(XML_NO_ERROR.into()),
+        let status = match node.document().last_parse_error() {
+            None => XML_NO_ERROR,
             Some(err) => match err.ref_error() {
-                ParseError::UnexpectedEof(_) => Ok(Value::Number(XML_ELEMENT_MALFORMED)),
-                ParseError::EndEventMismatch { .. } => Ok(Value::Number(XML_MISMATCHED_END)),
-                ParseError::XmlDeclWithoutVersion(_) => Ok(Value::Number(XML_DECL_NOT_TERMINATED)),
-                ParseError::NameWithQuote(_) => Ok(Value::Number(XML_ELEMENT_MALFORMED)),
-                ParseError::NoEqAfterName(_) => Ok(Value::Number(XML_ELEMENT_MALFORMED)),
-                ParseError::UnquotedValue(_) => Ok(Value::Number(XML_ATTRIBUTE_NOT_TERMINATED)),
-                ParseError::DuplicatedAttribute(_, _) => Ok(Value::Number(XML_ELEMENT_MALFORMED)),
-                _ => Ok(Value::Number(XML_OUT_OF_MEMORY)), //Not accounted for:
-                                                           //ParseError::UnexpectedToken(_)
-                                                           //ParseError::UnexpectedBang
-                                                           //ParseError::TextNotFound
-                                                           //ParseError::EscapeError(_)
+                ParseError::UnexpectedEof(_) => XML_ELEMENT_MALFORMED,
+                ParseError::EndEventMismatch { .. } => XML_MISMATCHED_END,
+                ParseError::XmlDeclWithoutVersion(_) => XML_DECL_NOT_TERMINATED,
+                ParseError::NameWithQuote(_) => XML_ELEMENT_MALFORMED,
+                ParseError::NoEqAfterName(_) => XML_ELEMENT_MALFORMED,
+                ParseError::UnquotedValue(_) => XML_ATTRIBUTE_NOT_TERMINATED,
+                ParseError::DuplicatedAttribute(_, _) => XML_ELEMENT_MALFORMED,
+                _ => XML_OUT_OF_MEMORY,
+                // Not accounted for:
+                // ParseError::UnexpectedToken(_)
+                // ParseError::UnexpectedBang
+                // ParseError::TextNotFound
+                // ParseError::EscapeError(_)
             },
         };
+        return Ok(status.into());
     }
 
     Ok(Value::Undefined)
+}
+
+fn spawn_xml_fetch<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Object<'gc>,
+    loader_object: Object<'gc>,
+    url: &AvmString,
+    send_object: Option<XmlNode<'gc>>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let request_options = if let Some(node) = send_object {
+        // Send `node` as string
+        RequestOptions::post(Some((
+            node.into_string(&mut is_as2_compatible)
+                .unwrap_or_default()
+                .into_bytes(),
+            "application/x-www-form-urlencoded".to_string(),
+        )))
+    } else {
+        // Not sending any parameters.
+        RequestOptions::get()
+    };
+
+    this.set("loaded", false.into(), activation)?;
+
+    let fetch = activation.context.navigator.fetch(url, request_options);
+    let target_clip = activation.target_clip_or_root()?;
+    // given any defined loader object, sends the request. Will load into LoadVars if given.
+    let process = if let Some(node) = loader_object.as_xml_node() {
+        activation.context.load_manager.load_xml_into_node(
+            activation.context.player.clone().unwrap(),
+            node,
+            target_clip,
+            fetch,
+        )
+    } else {
+        activation.context.load_manager.load_form_into_load_vars(
+            activation.context.player.clone().unwrap(),
+            loader_object,
+            fetch,
+        )
+    };
+
+    activation.context.navigator.spawn_future(process);
+
+    Ok(true.into())
 }
 
 /// Construct the prototype for `XML`.
@@ -1073,91 +918,7 @@ pub fn create_xml_proto<'gc>(
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     let xml_proto = XmlObject::empty_node(gc_context, Some(proto));
-
-    xml_proto.add_property(
-        gc_context,
-        "docTypeDecl",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xml_doc_type_decl),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xml_proto.define_value(gc_context, "ignoreWhite", false.into(), Attribute::empty());
-    xml_proto.add_property(
-        gc_context,
-        "xmlDecl",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xml_xml_decl),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xml_proto.add_property(
-        gc_context,
-        "idMap",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xml_id_map),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xml_proto.add_property(
-        gc_context,
-        "status",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(xml_status),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::READ_ONLY,
-    );
-    xml_proto.as_script_object().unwrap().force_set_function(
-        "createElement",
-        xml_create_element,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-    xml_proto.as_script_object().unwrap().force_set_function(
-        "createTextNode",
-        xml_create_text_node,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-    xml_proto.as_script_object().unwrap().force_set_function(
-        "parseXML",
-        xml_parse_xml,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-    xml_proto.as_script_object().unwrap().force_set_function(
-        "load",
-        xml_load,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-    xml_proto.as_script_object().unwrap().force_set_function(
-        "onData",
-        xml_on_data,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
+    let object = xml_proto.as_script_object().unwrap();
+    define_properties_on(XML_PROTO_DECLS, gc_context, object, fn_proto);
     xml_proto
 }

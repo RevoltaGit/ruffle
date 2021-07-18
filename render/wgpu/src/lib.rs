@@ -1,10 +1,10 @@
 use ruffle_core::backend::render::{
-    Bitmap, BitmapFormat, BitmapHandle, BitmapInfo, Color, MovieLibrary, RenderBackend,
+    Bitmap, BitmapFormat, BitmapHandle, BitmapInfo, BitmapSource, Color, RenderBackend,
     ShapeHandle, Transform,
 };
 use ruffle_core::shape_utils::DistilledShape;
 use ruffle_core::swf;
-use std::borrow::Cow;
+use std::{borrow::Cow, num::NonZeroU32};
 use target::TextureTarget;
 
 use bytemuck::{Pod, Zeroable};
@@ -141,18 +141,8 @@ struct ColorAdjustments {
 impl From<ColorTransform> for ColorAdjustments {
     fn from(transform: ColorTransform) -> Self {
         Self {
-            mult_color: [
-                transform.r_mult,
-                transform.g_mult,
-                transform.b_mult,
-                transform.a_mult,
-            ],
-            add_color: [
-                transform.r_add,
-                transform.g_add,
-                transform.b_add,
-                transform.a_add,
-            ],
+            mult_color: transform.mult_rgba_normalized(),
+            add_color: transform.add_rgba_normalized(),
         }
     }
 }
@@ -212,7 +202,7 @@ impl From<TessGradient> for GradientUniforms {
                 swf::GradientSpread::Reflect => 2,
             },
             interpolation: (gradient.interpolation == swf::GradientInterpolation::LinearRgb) as i32,
-            focal_point: gradient.focal_point,
+            focal_point: gradient.focal_point.to_f32(),
         }
     }
 }
@@ -301,7 +291,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         let extent = wgpu::Extent3d {
             width: target.width(),
             height: target.height(),
-            depth: 1,
+            depth_or_array_layers: 1,
         };
 
         let frame_buffer_label = create_debug_label!("Framebuffer texture");
@@ -398,22 +388,14 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
     fn register_shape_internal(
         &mut self,
         shape: DistilledShape,
-        library: Option<&MovieLibrary<'_>>,
+        bitmap_source: &dyn BitmapSource,
     ) -> Mesh {
         let shape_id = shape.id; // TODO: remove?
-        let textures = &self.textures;
-        let lyon_mesh = self.shape_tessellator.tessellate_shape(shape, |id| {
-            library
-                .and_then(|lib| lib.get_bitmap(id))
-                .and_then(|bitmap| {
-                    let handle = bitmap.bitmap_handle();
-                    textures.get(handle.0).map(|texture| (texture, handle))
-                })
-                .map(|(texture, handle)| (texture.width, texture.height, handle))
-        });
+        let lyon_mesh = self
+            .shape_tessellator
+            .tessellate_shape(shape, bitmap_source);
 
         let mut draws = Vec::with_capacity(lyon_mesh.len());
-
         for draw in lyon_mesh {
             let vertices: Vec<_> = draw.vertices.into_iter().map(Vertex::from).collect();
             let vertex_buffer = create_buffer_with_data(
@@ -482,27 +464,31 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
                                 entries: &[
                                     wgpu::BindGroupEntry {
                                         binding: 0,
-                                        resource: wgpu::BindingResource::Buffer {
-                                            buffer: &tex_transforms_ubo,
-                                            offset: 0,
-                                            size: wgpu::BufferSize::new(std::mem::size_of::<
-                                                TextureTransforms,
-                                            >(
-                                            )
-                                                as u64),
-                                        },
+                                        resource: wgpu::BindingResource::Buffer(
+                                            wgpu::BufferBinding {
+                                                buffer: &tex_transforms_ubo,
+                                                offset: 0,
+                                                size: wgpu::BufferSize::new(std::mem::size_of::<
+                                                    TextureTransforms,
+                                                >(
+                                                )
+                                                    as u64),
+                                            },
+                                        ),
                                     },
                                     wgpu::BindGroupEntry {
                                         binding: 1,
-                                        resource: wgpu::BindingResource::Buffer {
-                                            buffer: &gradient_ubo,
-                                            offset: 0,
-                                            size: wgpu::BufferSize::new(std::mem::size_of::<
-                                                GradientUniforms,
-                                            >(
-                                            )
-                                                as u64),
-                                        },
+                                        resource: wgpu::BindingResource::Buffer(
+                                            wgpu::BufferBinding {
+                                                buffer: &gradient_ubo,
+                                                offset: 0,
+                                                size: wgpu::BufferSize::new(std::mem::size_of::<
+                                                    GradientUniforms,
+                                                >(
+                                                )
+                                                    as u64),
+                                            },
+                                        ),
                                     },
                                 ],
                                 label: bind_group_label.as_deref(),
@@ -553,15 +539,17 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
                                 entries: &[
                                     wgpu::BindGroupEntry {
                                         binding: 0,
-                                        resource: wgpu::BindingResource::Buffer {
-                                            buffer: &tex_transforms_ubo,
-                                            offset: 0,
-                                            size: wgpu::BufferSize::new(std::mem::size_of::<
-                                                TextureTransforms,
-                                            >(
-                                            )
-                                                as u64),
-                                        },
+                                        resource: wgpu::BindingResource::Buffer(
+                                            wgpu::BufferBinding {
+                                                buffer: &tex_transforms_ubo,
+                                                offset: 0,
+                                                size: wgpu::BufferSize::new(std::mem::size_of::<
+                                                    TextureTransforms,
+                                                >(
+                                                )
+                                                    as u64),
+                                            },
+                                        ),
                                     },
                                     wgpu::BindGroupEntry {
                                         binding: 1,
@@ -594,7 +582,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         let extent = wgpu::Extent3d {
             width: bitmap.width,
             height: bitmap.height,
-            depth: 1,
+            depth_or_array_layers: 1,
         };
 
         let data: Cow<[u8]> = match &bitmap.data {
@@ -628,16 +616,16 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             });
 
         self.descriptors.queue.write_texture(
-            wgpu::TextureCopyView {
+            wgpu::ImageCopyTexture {
                 texture: &texture,
                 mip_level: 0,
                 origin: Default::default(),
             },
             &data,
-            wgpu::TextureDataLayout {
+            wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: 4 * extent.width,
-                rows_per_image: 0,
+                bytes_per_row: NonZeroU32::new(4 * extent.width),
+                rows_per_image: None,
             },
             extent,
         );
@@ -656,13 +644,13 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::Buffer {
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                             buffer: &self.quad_tex_transforms,
                             offset: 0,
                             size: wgpu::BufferSize::new(
                                 std::mem::size_of::<TextureTransforms>() as u64
                             ),
-                        },
+                        }),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -713,7 +701,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 size: wgpu::Extent3d {
                     width,
                     height,
-                    depth: 1,
+                    depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
                 sample_count: self.descriptors.msaa_sample_count,
@@ -732,7 +720,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 size: wgpu::Extent3d {
                     width,
                     height,
-                    depth: 1,
+                    depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
                 sample_count: self.descriptors.msaa_sample_count,
@@ -747,10 +735,10 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     fn register_shape(
         &mut self,
         shape: DistilledShape,
-        library: Option<&MovieLibrary<'_>>,
+        bitmap_source: &dyn BitmapSource,
     ) -> ShapeHandle {
         let handle = ShapeHandle(self.meshes.len());
-        let mesh = self.register_shape_internal(shape, library);
+        let mesh = self.register_shape_internal(shape, bitmap_source);
         self.meshes.push(mesh);
         handle
     }
@@ -758,17 +746,20 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     fn replace_shape(
         &mut self,
         shape: DistilledShape,
-        library: Option<&MovieLibrary<'_>>,
+        bitmap_source: &dyn BitmapSource,
         handle: ShapeHandle,
     ) {
-        let mesh = self.register_shape_internal(shape, library);
+        let mesh = self.register_shape_internal(shape, bitmap_source);
         self.meshes[handle.0] = mesh;
     }
 
     fn register_glyph_shape(&mut self, glyph: &swf::Glyph) -> ShapeHandle {
         let shape = ruffle_core::shape_utils::swf_glyph_to_shape(glyph);
         let handle = ShapeHandle(self.meshes.len());
-        let mesh = self.register_shape_internal((&shape).into(), None);
+        let mesh = self.register_shape_internal(
+            (&shape).into(),
+            &ruffle_core::backend::render::NullBitmapSource,
+        );
         self.meshes.push(mesh);
         handle
     }
@@ -836,15 +827,15 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             .globals
             .update_uniform(&self.descriptors.device, &mut frame_data.0);
 
-        let (color_attachment, resolve_target) = if self.descriptors.msaa_sample_count >= 2 {
+        let (color_view, resolve_target) = if self.descriptors.msaa_sample_count >= 2 {
             (&self.frame_buffer_view, Some(frame_data.1.view()))
         } else {
             (frame_data.1.view(), None)
         };
 
         let render_pass = frame_data.0.begin_render_pass(&wgpu::RenderPassDescriptor {
-            color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
-                attachment: color_attachment,
+            color_attachments: &[wgpu::RenderPassColorAttachment {
+                view: color_view,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: f64::from(clear.r) / 255.0,
@@ -856,8 +847,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 },
                 resolve_target,
             }],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachmentDescriptor {
-                attachment: &self.depth_texture_view,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_texture_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(0.0),
                     store: true,
@@ -891,7 +882,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
             let transform = Transform {
                 matrix: transform.matrix
-                    * swf::Matrix {
+                    * ruffle_core::matrix::Matrix {
                         a: texture.width as f32,
                         d: texture.height as f32,
                         ..Default::default()
@@ -992,8 +983,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             match &draw.draw_type {
                 DrawType::Color => {
                     frame.render_pass.set_pipeline(
-                        &self
-                            .descriptors
+                        self.descriptors
                             .pipelines
                             .color_pipelines
                             .pipeline_for(self.mask_state),
@@ -1001,8 +991,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 }
                 DrawType::Gradient { bind_group, .. } => {
                     frame.render_pass.set_pipeline(
-                        &self
-                            .descriptors
+                        self.descriptors
                             .pipelines
                             .gradient_pipelines
                             .pipeline_for(self.mask_state),
@@ -1016,8 +1005,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     ..
                 } => {
                     frame.render_pass.set_pipeline(
-                        &self
-                            .descriptors
+                        self.descriptors
                             .pipelines
                             .bitmap_pipelines
                             .pipeline_for(self.mask_state),
@@ -1066,7 +1054,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         }
     }
 
-    fn draw_rect(&mut self, color: Color, matrix: &swf::Matrix) {
+    fn draw_rect(&mut self, color: Color, matrix: &ruffle_core::matrix::Matrix) {
         let frame = if let Some(frame) = &mut self.current_frame {
             frame.get()
         } else {
@@ -1094,8 +1082,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         let add_color = [0.0, 0.0, 0.0, 0.0];
         frame.render_pass.set_pipeline(
-            &self
-                .descriptors
+            self.descriptors
                 .pipelines
                 .color_pipelines
                 .pipeline_for(self.mask_state),
@@ -1220,20 +1207,20 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         let extent = wgpu::Extent3d {
             width,
             height,
-            depth: 1,
+            depth_or_array_layers: 1,
         };
 
         self.descriptors.queue.write_texture(
-            wgpu::TextureCopyView {
-                texture: &texture,
+            wgpu::ImageCopyTexture {
+                texture,
                 mip_level: 0,
                 origin: Default::default(),
             },
             &rgba,
-            wgpu::TextureDataLayout {
+            wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: 4 * extent.width,
-                rows_per_image: 0,
+                bytes_per_row: NonZeroU32::new(4 * extent.width),
+                rows_per_image: None,
             },
             extent,
         );

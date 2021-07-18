@@ -14,7 +14,7 @@ use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{DisplayObjectBase, TDisplayObject};
 use crate::drawing::Drawing;
 use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode};
-use crate::font::{Glyph, TextRenderSettings};
+use crate::font::{round_down_to_pixel, Glyph, TextRenderSettings};
 use crate::html::{BoxBounds, FormatSpans, LayoutBox, LayoutContent, TextFormat};
 use crate::prelude::*;
 use crate::shape_utils::DrawCommand;
@@ -152,6 +152,63 @@ pub struct EditTextData<'gc> {
 
     /// Which rendering engine this text field will use.
     render_settings: TextRenderSettings,
+
+    /// How many pixels right the text is offset by. 0-based index.
+    hscroll: f64,
+
+    /// Information about the layout's current lines. Used by scroll properties.
+    line_data: Vec<LineData>,
+
+    /// How many lines down the text is offset by. 1-based index.
+    scroll: usize,
+}
+
+// TODO: would be nicer to compute (and return) this during layout, instead of afterwards
+/// Compute line (index, offset, extent) from the layout data.
+fn get_line_data(layout: &[LayoutBox]) -> Vec<LineData> {
+    // if there are no boxes, there are no lines
+    if layout.is_empty() {
+        return Vec::new();
+    }
+
+    let first_box = &layout[0];
+
+    let mut index = 1;
+    let mut offset = first_box.bounds().offset_y();
+    let mut extent = first_box.bounds().extent_y();
+
+    let mut line_data = Vec::new();
+
+    for layout_box in layout.get(1..).unwrap() {
+        let bounds = layout_box.bounds();
+
+        // if the top of the new box is lower than the bottom of the old box, it's a new line
+        if bounds.offset_y() > extent {
+            // save old line and reset
+            line_data.push(LineData {
+                index,
+                offset,
+                extent,
+            });
+
+            index += 1;
+            offset = bounds.offset_y();
+            extent = bounds.extent_y();
+        } else {
+            // otherwise we continue from the previous box
+            offset = offset.min(bounds.offset_y());
+            extent = extent.max(bounds.extent_y());
+        }
+    }
+
+    // save the final line
+    line_data.push(LineData {
+        index,
+        offset,
+        extent,
+    });
+
+    line_data
 }
 
 impl<'gc> EditText<'gc> {
@@ -168,7 +225,7 @@ impl<'gc> EditText<'gc> {
         let is_editable = !swf_tag.is_read_only;
         let is_html = swf_tag.is_html;
         let document = XmlDocument::new(context.gc_context);
-        let text = swf_tag.initial_text.clone().unwrap_or_default();
+        let text = swf_tag.initial_text.unwrap_or_default();
         let default_format = TextFormat::from_swf_tag(swf_tag.clone(), swf_movie.clone(), context);
         let encoding = swf_movie.encoding();
 
@@ -204,6 +261,7 @@ impl<'gc> EditText<'gc> {
             swf_tag.is_word_wrap,
             swf_tag.is_device_font,
         );
+        let line_data = get_line_data(&layout);
 
         let has_background = swf_tag.has_border;
         let background_color = 0xFFFFFF; // Default is white
@@ -281,6 +339,9 @@ impl<'gc> EditText<'gc> {
                 selection: None,
                 has_focus: false,
                 render_settings: Default::default(),
+                hscroll: 0.0,
+                line_data,
+                scroll: 1,
             },
         ));
 
@@ -603,10 +664,7 @@ impl<'gc> EditText<'gc> {
     /// `DisplayObject`.
     pub fn text_transform(self, color: swf::Color, baseline_adjustment: Twips) -> Transform {
         let mut transform: Transform = Default::default();
-        transform.color_transform.r_mult = f32::from(color.r) / 255.0;
-        transform.color_transform.g_mult = f32::from(color.g) / 255.0;
-        transform.color_transform.b_mult = f32::from(color.b) / 255.0;
-        transform.color_transform.a_mult = f32::from(color.a) / 255.0;
+        transform.color_transform.set_mult_color(&color);
 
         // TODO MIKE: This feels incorrect here but is necessary for correct vertical position;
         // the glyphs are rendered relative to the baseline. This should be taken into account either
@@ -713,11 +771,11 @@ impl<'gc> EditText<'gc> {
                 write.drawing.set_fill_style(None);
             }
             write.drawing.draw_command(DrawCommand::MoveTo {
-                x: Twips::zero(),
-                y: Twips::zero(),
+                x: Twips::ZERO,
+                y: Twips::ZERO,
             });
             write.drawing.draw_command(DrawCommand::LineTo {
-                x: Twips::zero(),
+                x: Twips::ZERO,
                 y: bounds.y_max - bounds.y_min,
             });
             write.drawing.draw_command(DrawCommand::LineTo {
@@ -726,11 +784,11 @@ impl<'gc> EditText<'gc> {
             });
             write.drawing.draw_command(DrawCommand::LineTo {
                 x: bounds.x_max - bounds.x_min,
-                y: Twips::zero(),
+                y: Twips::ZERO,
             });
             write.drawing.draw_command(DrawCommand::LineTo {
-                x: Twips::zero(),
-                y: Twips::zero(),
+                x: Twips::ZERO,
+                y: Twips::ZERO,
             });
         }
     }
@@ -769,8 +827,12 @@ impl<'gc> EditText<'gc> {
             edit_text.is_device_font,
         );
 
+        edit_text.line_data = get_line_data(&new_layout);
         edit_text.layout = new_layout;
         edit_text.intrinsic_bounds = intrinsic_bounds;
+        // reset scroll
+        edit_text.hscroll = 0.0;
+        edit_text.scroll = 1;
 
         match autosize {
             AutoSizeMode::None => {}
@@ -823,6 +885,75 @@ impl<'gc> EditText<'gc> {
             edit_text.intrinsic_bounds.width(),
             edit_text.intrinsic_bounds.height(),
         )
+    }
+
+    /// How far the text can be scrolled right, in pixels.
+    pub fn maxhscroll(self) -> f64 {
+        let edit_text = self.0.read();
+
+        // word-wrapped text can't be scrolled
+        if edit_text.is_word_wrap {
+            return 0.0;
+        }
+
+        let base =
+            round_down_to_pixel(edit_text.intrinsic_bounds.width() - edit_text.bounds.width())
+                .to_pixels()
+                .max(0.0);
+
+        // input text boxes get extra space at the end
+        if edit_text.is_editable {
+            base + 41.0
+        } else {
+            base
+        }
+    }
+
+    /// How many lines the text can be scrolled down
+    pub fn maxscroll(self) -> usize {
+        let edit_text = self.0.read();
+
+        let line_data = &edit_text.line_data;
+
+        if line_data.is_empty() {
+            return 1;
+        }
+
+        let target = line_data.last().unwrap().extent - edit_text.bounds.height();
+
+        // minimum line n such that n.offset > max.extent - bounds.height()
+        let max_line = line_data.iter().find(|&&l| target < l.offset);
+        if let Some(line) = max_line {
+            line.index
+        } else {
+            // I don't know how this could happen, so return the limit
+            line_data.last().unwrap().index
+        }
+    }
+
+    /// The lowest visible line of text
+    pub fn bottom_scroll(self) -> usize {
+        let edit_text = self.0.read();
+
+        let line_data = &edit_text.line_data;
+
+        if line_data.is_empty() {
+            return 1;
+        }
+
+        let scroll_offset = line_data
+            .get(edit_text.scroll - 1)
+            .map_or(Twips::ZERO, |l| l.offset);
+        let target = edit_text.bounds.height() + scroll_offset;
+
+        // Line before first line with extent greater than bounds.height() + line "scroll"'s offset
+        let too_far = line_data.iter().find(|&&l| l.extent > target);
+        if let Some(line) = too_far {
+            line.index - 1
+        } else {
+            // all lines are visible
+            line_data.last().unwrap().index
+        }
     }
 
     /// Render a layout box, plus its children.
@@ -891,20 +1022,11 @@ impl<'gc> EditText<'gc> {
                             // Set text color to white
                             context.transform_stack.push(&Transform {
                                 matrix: transform.matrix,
-                                color_transform: ColorTransform {
-                                    r_mult: 1.0,
-                                    g_mult: 1.0,
-                                    b_mult: 1.0,
-                                    a_mult: 1.0,
-                                    r_add: 0.0,
-                                    g_add: 0.0,
-                                    b_add: 0.0,
-                                    a_add: 0.0,
-                                },
+                                color_transform: ColorTransform::default(),
                             });
                         }
                         _ => {
-                            context.transform_stack.push(&transform);
+                            context.transform_stack.push(transform);
                         }
                     }
 
@@ -942,8 +1064,7 @@ impl<'gc> EditText<'gc> {
         }
 
         if let Some(drawing) = lbox.as_renderable_drawing() {
-            let movie = self.movie();
-            drawing.render(context, movie);
+            drawing.render(context);
         }
 
         context.transform_stack.pop();
@@ -971,12 +1092,12 @@ impl<'gc> EditText<'gc> {
             let variable = (*var_path).to_string();
             drop(var_path);
 
-            let parent = self.parent().unwrap();
+            let parent = self.avm1_parent().unwrap();
 
             activation.run_with_child_frame_for_display_object(
                 "[Text Field Binding]",
                 parent,
-                activation.context.swf.header().version,
+                activation.context.swf.version(),
                 |activation| {
                     if let Ok(Some((object, property))) =
                         activation.resolve_variable_path(parent, &variable)
@@ -986,7 +1107,7 @@ impl<'gc> EditText<'gc> {
                             // If the property exists on the object, we overwrite the text with the property's value.
                             if object.has_property(activation, property) {
                                 let value = object.get(property, activation).unwrap();
-                                let _ = self.set_text(
+                                let _ = self.set_html_text(
                                     value
                                         .coerce_to_string(activation)
                                         .unwrap_or_default()
@@ -1050,7 +1171,7 @@ impl<'gc> EditText<'gc> {
                 drop(variable);
 
                 if let Ok(Some((object, property))) =
-                    activation.resolve_variable_path(self.parent().unwrap(), &variable_path)
+                    activation.resolve_variable_path(self.avm1_parent().unwrap(), &variable_path)
                 {
                     let text = if self.0.read().is_html {
                         let html_tree = self.html_tree(&mut activation.context).as_node();
@@ -1064,8 +1185,8 @@ impl<'gc> EditText<'gc> {
                     // (virtual property changes do not affect the text field)
                     activation.run_with_child_frame_for_display_object(
                         "[Propagate Text Binding]",
-                        self.parent().unwrap(),
-                        activation.context.swf.header().version,
+                        self.avm1_parent().unwrap(),
+                        activation.context.swf.version(),
                         |activation| {
                             let _ = object.set(
                                 property,
@@ -1108,6 +1229,31 @@ impl<'gc> EditText<'gc> {
         self.0.write(gc_context).render_settings = settings
     }
 
+    pub fn hscroll(self) -> f64 {
+        self.0.read().hscroll
+    }
+
+    pub fn set_hscroll(self, hscroll: f64, context: &mut UpdateContext<'_, 'gc, '_>) {
+        self.0.write(context.gc_context).hscroll = hscroll;
+    }
+
+    pub fn scroll(self) -> usize {
+        self.0.read().scroll
+    }
+
+    pub fn set_scroll(self, scroll: f64, context: &mut UpdateContext<'_, 'gc, '_>) {
+        // derived experimentally. Not exact: overflows somewhere above 767100486418432.9
+        // Checked in SWF 6, AVM1. Same in AVM2.
+        const SCROLL_OVERFLOW_LIMIT: f64 = 767100486418433.0;
+        let scroll_lines = if scroll.is_nan() || scroll < 0.0 || scroll >= SCROLL_OVERFLOW_LIMIT {
+            1
+        } else {
+            scroll as usize
+        };
+        let clamped = scroll_lines.clamp(1, self.maxscroll());
+        self.0.write(context.gc_context).scroll = clamped;
+    }
+
     pub fn screen_position_to_index(self, position: (Twips, Twips)) -> Option<usize> {
         let text = self.0.read();
         let position = self.global_to_local(position);
@@ -1135,7 +1281,7 @@ impl<'gc> EditText<'gc> {
                     |pos, _transform, _glyph: &Glyph, advance, x| {
                         if local_position.0 >= x
                             && local_position.0 <= x + advance
-                            && local_position.1 >= Twips::zero()
+                            && local_position.1 >= Twips::ZERO
                             && local_position.1 <= params.height()
                         {
                             if local_position.0 >= x + (advance / 2) {
@@ -1216,7 +1362,7 @@ impl<'gc> EditText<'gc> {
 
             if changed {
                 let globals = context.avm1.global_object_cell();
-                let swf_version = context.swf.header().version;
+                let swf_version = context.swf.version();
                 let mut activation = Avm1Activation::from_nothing(
                     context.reborrow(),
                     ActivationIdentifier::root("[Propagate Text Binding]"),
@@ -1230,6 +1376,61 @@ impl<'gc> EditText<'gc> {
         }
     }
 
+    /// Listens for keyboard text control commands.
+    ///
+    /// TODO: Add explicit text control events (#4452).
+    pub fn handle_text_control_event(
+        self,
+        context: &mut UpdateContext<'_, 'gc, '_>,
+        event: ClipEvent,
+    ) -> ClipEventResult {
+        if let ClipEvent::KeyPress { key_code } = event {
+            let mut edit_text = self.0.write(context.gc_context);
+            let selection = edit_text.selection;
+            if let Some(mut selection) = selection {
+                let text = edit_text.text_spans.text();
+                let length = text.len();
+                match key_code {
+                    ButtonKeyCode::Left => {
+                        if (context.ui.is_key_down(KeyCode::Shift) || selection.is_caret())
+                            && selection.to > 0
+                        {
+                            selection.to = string_utils::prev_char_boundary(text, selection.to);
+                            if !context.ui.is_key_down(KeyCode::Shift) {
+                                selection.from = selection.to;
+                            }
+                        } else if !context.ui.is_key_down(KeyCode::Shift) {
+                            selection.to = selection.start();
+                            selection.from = selection.to;
+                        }
+                        selection.clamp(length);
+                        edit_text.selection = Some(selection);
+                        return ClipEventResult::Handled;
+                    }
+                    ButtonKeyCode::Right => {
+                        if (context.ui.is_key_down(KeyCode::Shift) || selection.is_caret())
+                            && selection.to < length
+                        {
+                            selection.to = string_utils::next_char_boundary(text, selection.to);
+                            if !context.ui.is_key_down(KeyCode::Shift) {
+                                selection.from = selection.to;
+                            }
+                        } else if !context.ui.is_key_down(KeyCode::Shift) {
+                            selection.to = selection.end();
+                            selection.from = selection.to;
+                        }
+                        selection.clamp(length);
+                        edit_text.selection = Some(selection);
+                        return ClipEventResult::Handled;
+                    }
+                    _ => (),
+                }
+            }
+        }
+
+        ClipEventResult::NotHandled
+    }
+
     fn initialize_as_broadcaster(&self, activation: &mut Avm1Activation<'_, 'gc, '_>) {
         if let Avm1Value::Object(object) = self.object() {
             activation.context.avm1.broadcaster_functions().initialize(
@@ -1239,15 +1440,13 @@ impl<'gc> EditText<'gc> {
             );
 
             if let Ok(Avm1Value::Object(listeners)) = object.get("_listeners", activation) {
-                if listeners.length() == 0 {
+                let length = listeners.length(activation);
+                if matches!(length, Ok(0)) {
                     // Add the TextField as its own listener to match Flash's behavior
                     // This makes it so that the TextField's handlers are called before other listeners'.
-                    listeners.set_array_element(0, object.into(), activation.context.gc_context);
+                    listeners.set_element(activation, 0, object.into()).unwrap();
                 } else {
-                    log::warn!(
-                        "_listeners should be empty, but its length is {}",
-                        listeners.length()
-                    );
+                    log::warn!("_listeners should be empty");
                 }
             }
         }
@@ -1349,8 +1548,7 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
 
     /// Construct objects placed on this frame.
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        if self.vm_type(context) == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined)
-        {
+        if self.avm_type() == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
             self.construct_as_avm2_object(context, (*self).into());
         }
     }
@@ -1372,6 +1570,12 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         run_frame: bool,
     ) {
         self.set_default_instance_name(context);
+
+        if self.avm_type() == AvmType::Avm1 {
+            context
+                .avm1
+                .add_to_exec_list(context.gc_context, (*self).into());
+        }
 
         let mut text = self.0.write(context.gc_context);
         text.document = text
@@ -1411,6 +1615,10 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
             .and_then(|o| o.as_avm2_object().ok())
             .map(Avm2Value::from)
             .unwrap_or(Avm2Value::Undefined)
+    }
+
+    fn set_object2(&mut self, mc: MutationContext<'gc, '_>, to: Avm2Object<'gc>) {
+        self.0.write(mc).object = Some(to.into());
     }
 
     fn self_bounds(&self) -> BoundingBox {
@@ -1482,12 +1690,10 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
     }
 
     fn render_self(&self, context: &mut RenderContext<'_, 'gc>) {
-        if !self.world_bounds().intersects(&context.view_bounds) {
+        if !self.world_bounds().intersects(&context.stage.view_bounds()) {
             // Off-screen; culled
             return;
         }
-
-        let movie = self.movie();
 
         let edit_text = self.0.read();
         context.transform_stack.push(&Transform {
@@ -1499,15 +1705,15 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
             ..Default::default()
         });
 
-        edit_text.drawing.render(context, movie);
+        edit_text.drawing.render(context);
 
         context.renderer.push_mask();
         let mask = Matrix::create_box(
             edit_text.bounds.width().to_pixels() as f32,
             edit_text.bounds.height().to_pixels() as f32,
             0.0,
-            Twips::zero(),
-            Twips::zero(),
+            Twips::ZERO,
+            Twips::ZERO,
         );
         context.renderer.draw_rect(
             Color::from_rgb(0, 0xff),
@@ -1515,12 +1721,24 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         );
         context.renderer.activate_mask();
 
+        let scroll_offset = if edit_text.scroll > 1 {
+            let line_data = &edit_text.line_data;
+
+            if let Some(line_data) = line_data.get(edit_text.scroll - 1) {
+                line_data.offset
+            } else {
+                Twips::ZERO
+            }
+        } else {
+            Twips::ZERO
+        };
         // TODO: Where does this come from? How is this different than INTERNAL_PADDING? Does this apply to y as well?
         // If this is actually right, offset the border in `redraw_border` instead of doing an extra push.
         context.transform_stack.push(&Transform {
             matrix: Matrix {
-                tx: Twips::from_pixels(Self::INTERNAL_PADDING),
-                ty: Twips::from_pixels(Self::INTERNAL_PADDING),
+                tx: Twips::from_pixels(Self::INTERNAL_PADDING)
+                    - Twips::from_pixels(edit_text.hscroll),
+                ty: Twips::from_pixels(Self::INTERNAL_PADDING) - scroll_offset,
                 ..Default::default()
             },
             ..Default::default()
@@ -1608,22 +1826,15 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
     fn mouse_pick(
         &self,
         context: &mut UpdateContext<'_, 'gc, '_>,
-        self_node: DisplayObject<'gc>,
         point: (Twips, Twips),
+        _require_button_mode: bool,
     ) -> Option<DisplayObject<'gc>> {
         // The button is hovered if the mouse is over any child nodes.
         if self.visible()
             && self.is_selectable()
-            && self.hit_test_shape(
-                context,
-                point,
-                HitTestOptions {
-                    skip_mask: true,
-                    skip_invisible: true,
-                },
-            )
+            && self.hit_test_shape(context, point, HitTestOptions::MOUSE_PICK)
         {
-            Some(self_node)
+            Some((*self).into())
         } else {
             None
         }
@@ -1651,65 +1862,21 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
         context: &mut UpdateContext<'_, 'gc, '_>,
         event: ClipEvent,
     ) -> ClipEventResult {
-        match event {
-            ClipEvent::Press => {
-                let tracker = context.focus_tracker;
-                tracker.set(Some((*self).into()), context);
-                if let Some(position) = self
-                    .screen_position_to_index(*context.mouse_position)
-                    .map(TextSelection::for_position)
-                {
-                    self.0.write(context.gc_context).selection = Some(position);
-                } else {
-                    self.0.write(context.gc_context).selection =
-                        Some(TextSelection::for_position(self.text_length()));
-                }
-                ClipEventResult::Handled
+        if event == ClipEvent::Press {
+            let tracker = context.focus_tracker;
+            tracker.set(Some((*self).into()), context);
+            if let Some(position) = self
+                .screen_position_to_index(*context.mouse_position)
+                .map(TextSelection::for_position)
+            {
+                self.0.write(context.gc_context).selection = Some(position);
+            } else {
+                self.0.write(context.gc_context).selection =
+                    Some(TextSelection::for_position(self.text_length()));
             }
-            ClipEvent::KeyPress { key_code } => {
-                let mut edit_text = self.0.write(context.gc_context);
-                let selection = edit_text.selection;
-                if let Some(mut selection) = selection {
-                    let text = edit_text.text_spans.text();
-                    let length = text.len();
-                    match key_code {
-                        ButtonKeyCode::Left => {
-                            if (context.ui.is_key_down(KeyCode::Shift) || selection.is_caret())
-                                && selection.to > 0
-                            {
-                                selection.to = string_utils::prev_char_boundary(text, selection.to);
-                                if !context.ui.is_key_down(KeyCode::Shift) {
-                                    selection.from = selection.to;
-                                }
-                            } else if !context.ui.is_key_down(KeyCode::Shift) {
-                                selection.to = selection.start();
-                                selection.from = selection.to;
-                            }
-                        }
-                        ButtonKeyCode::Right => {
-                            if (context.ui.is_key_down(KeyCode::Shift) || selection.is_caret())
-                                && selection.to < length
-                            {
-                                selection.to = string_utils::next_char_boundary(text, selection.to);
-                                if !context.ui.is_key_down(KeyCode::Shift) {
-                                    selection.from = selection.to;
-                                }
-                            } else if !context.ui.is_key_down(KeyCode::Shift) {
-                                selection.to = selection.end();
-                                selection.from = selection.to;
-                            }
-                        }
-                        _ => {}
-                    }
-                    selection.clamp(length);
-                    edit_text.selection = Some(selection);
-                    ClipEventResult::Handled
-                } else {
-                    ClipEventResult::NotHandled
-                }
-            }
-            _ => ClipEventResult::NotHandled,
+            return ClipEventResult::Handled;
         }
+        ClipEventResult::NotHandled
     }
 }
 
@@ -1750,6 +1917,17 @@ struct EditTextStaticData {
 pub struct TextSelection {
     from: usize,
     to: usize,
+}
+
+/// Information about the start and end y-coordinates of a given line of text
+#[derive(Copy, Clone, Debug, Collect)]
+#[collect(require_static)]
+pub struct LineData {
+    index: usize,
+    /// How many twips down the highest point of the line is
+    offset: Twips,
+    /// How many twips down the lowest point of the line is
+    extent: Twips,
 }
 
 impl TextSelection {

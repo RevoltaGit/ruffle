@@ -1,15 +1,16 @@
 //! AVM2 classes
 
-use crate::avm2::method::Method;
+use crate::avm2::method::{Method, NativeMethod};
 use crate::avm2::names::{Multiname, Namespace, QName};
 use crate::avm2::script::TranslationUnit;
 use crate::avm2::string::AvmString;
 use crate::avm2::traits::{Trait, TraitKind};
 use crate::avm2::{Avm2, Error};
-use crate::collect::CollectWrapper;
 use bitflags::bitflags;
 use gc_arena::{Collect, GcCell, MutationContext};
-use swf::avm2::types::{Class as AbcClass, Instance as AbcInstance};
+use swf::avm2::types::{
+    Class as AbcClass, Instance as AbcInstance, Method as AbcMethod, MethodBody as AbcMethodBody,
+};
 
 bitflags! {
     /// All possible attributes for a given class.
@@ -38,7 +39,8 @@ pub struct Class<'gc> {
     super_class: Option<Multiname<'gc>>,
 
     /// Attributes of the given class.
-    attributes: CollectWrapper<ClassAttributes>,
+    #[collect(require_static)]
+    attributes: ClassAttributes,
 
     /// The namespace that protected traits of this class are stored into.
     protected_namespace: Option<Namespace<'gc>>,
@@ -108,6 +110,28 @@ fn do_trait_lookup<'gc>(
     Ok(())
 }
 
+/// Find traits in a list of traits matching a slot ID.
+fn do_trait_lookup_by_slot<'gc>(
+    id: u32,
+    all_traits: &[Trait<'gc>],
+) -> Result<Option<Trait<'gc>>, Error> {
+    for trait_entry in all_traits {
+        let trait_id = match trait_entry.kind() {
+            TraitKind::Slot { slot_id, .. } => slot_id,
+            TraitKind::Const { slot_id, .. } => slot_id,
+            TraitKind::Class { slot_id, .. } => slot_id,
+            TraitKind::Function { slot_id, .. } => slot_id,
+            _ => continue,
+        };
+
+        if id == *trait_id {
+            return Ok(Some(trait_entry.clone()));
+        }
+    }
+
+    Ok(None)
+}
+
 impl<'gc> Class<'gc> {
     /// Create a new class.
     ///
@@ -129,7 +153,7 @@ impl<'gc> Class<'gc> {
             Self {
                 name,
                 super_class,
-                attributes: CollectWrapper(ClassAttributes::empty()),
+                attributes: ClassAttributes::empty(),
                 protected_namespace: None,
                 interfaces: Vec::new(),
                 instance_init,
@@ -143,7 +167,7 @@ impl<'gc> Class<'gc> {
 
     /// Set the attributes of the class (sealed/final/interface status).
     pub fn set_attributes(&mut self, attributes: ClassAttributes) {
-        self.attributes = CollectWrapper(attributes);
+        self.attributes = attributes;
     }
 
     /// Add a protected namespace to this class.
@@ -213,7 +237,7 @@ impl<'gc> Class<'gc> {
             Self {
                 name,
                 super_class,
-                attributes: CollectWrapper(attributes),
+                attributes,
                 protected_namespace,
                 interfaces,
                 instance_init,
@@ -259,15 +283,55 @@ impl<'gc> Class<'gc> {
 
         for abc_trait in abc_instance.traits.iter() {
             self.instance_traits
-                .push(Trait::from_abc_trait(unit, &abc_trait, avm2, mc)?);
+                .push(Trait::from_abc_trait(unit, abc_trait, avm2, mc)?);
         }
 
         for abc_trait in abc_class.traits.iter() {
             self.class_traits
-                .push(Trait::from_abc_trait(unit, &abc_trait, avm2, mc)?);
+                .push(Trait::from_abc_trait(unit, abc_trait, avm2, mc)?);
         }
 
         Ok(())
+    }
+
+    pub fn from_method_body(
+        avm2: &mut Avm2<'gc>,
+        mc: MutationContext<'gc, '_>,
+        translation_unit: TranslationUnit<'gc>,
+        method: &AbcMethod,
+        body: &AbcMethodBody,
+    ) -> Result<GcCell<'gc, Self>, Error> {
+        let name = translation_unit.pool_string(method.name.as_u30(), mc)?;
+        let mut traits = Vec::new();
+
+        for trait_entry in body.traits.iter() {
+            traits.push(Trait::from_abc_trait(
+                translation_unit,
+                trait_entry,
+                avm2,
+                mc,
+            )?);
+        }
+
+        Ok(GcCell::allocate(
+            mc,
+            Self {
+                name: QName::dynamic_name(name),
+                super_class: None,
+                attributes: ClassAttributes::empty(),
+                protected_namespace: None,
+                interfaces: Vec::new(),
+                instance_init: Method::from_builtin(|_, _, _| {
+                    Err("Do not call activation initializers!".into())
+                }),
+                instance_traits: traits,
+                class_init: Method::from_builtin(|_, _, _| {
+                    Err("Do not call activation class initializers!".into())
+                }),
+                class_traits: Vec::new(),
+                traits_loaded: true,
+            },
+        ))
     }
 
     pub fn name(&self) -> &QName<'gc> {
@@ -276,6 +340,90 @@ impl<'gc> Class<'gc> {
 
     pub fn super_class_name(&self) -> &Option<Multiname<'gc>> {
         &self.super_class
+    }
+
+    #[inline(never)]
+    pub fn define_public_constant_string_class_traits(
+        &mut self,
+        items: &[(&'static str, &'static str)],
+    ) {
+        for &(name, value) in items {
+            self.define_class_trait(Trait::from_const(
+                QName::new(Namespace::public(), name),
+                QName::new(Namespace::public(), "String").into(),
+                Some(value.into()),
+            ));
+        }
+    }
+    #[inline(never)]
+    pub fn define_public_constant_number_class_traits(&mut self, items: &[(&'static str, f64)]) {
+        for &(name, value) in items {
+            self.define_class_trait(Trait::from_const(
+                QName::new(Namespace::public(), name),
+                QName::new(Namespace::public(), "Number").into(),
+                Some(value.into()),
+            ));
+        }
+    }
+    #[inline(never)]
+    pub fn define_public_constant_uint_class_traits(&mut self, items: &[(&'static str, u32)]) {
+        for &(name, value) in items {
+            self.define_class_trait(Trait::from_const(
+                QName::new(Namespace::public(), name),
+                QName::new(Namespace::public(), "uint").into(),
+                Some(value.into()),
+            ));
+        }
+    }
+    #[inline(never)]
+    pub fn define_public_builtin_instance_methods(
+        &mut self,
+        items: &[(&'static str, NativeMethod)],
+    ) {
+        for &(name, value) in items {
+            self.define_instance_trait(Trait::from_method(
+                QName::new(Namespace::public(), name),
+                Method::from_builtin(value),
+            ));
+        }
+    }
+    #[inline(never)]
+    pub fn define_as3_builtin_instance_methods(&mut self, items: &[(&'static str, NativeMethod)]) {
+        for &(name, value) in items {
+            self.define_instance_trait(Trait::from_method(
+                QName::new(Namespace::as3_namespace(), name),
+                Method::from_builtin(value),
+            ));
+        }
+    }
+    #[inline(never)]
+    pub fn define_public_builtin_class_methods(&mut self, items: &[(&'static str, NativeMethod)]) {
+        for &(name, value) in items {
+            self.define_class_trait(Trait::from_method(
+                QName::new(Namespace::public(), name),
+                Method::from_builtin(value),
+            ));
+        }
+    }
+    #[inline(never)]
+    pub fn define_public_builtin_instance_properties(
+        &mut self,
+        items: &[(&'static str, Option<NativeMethod>, Option<NativeMethod>)],
+    ) {
+        for &(name, getter, setter) in items {
+            if let Some(getter) = getter {
+                self.define_instance_trait(Trait::from_getter(
+                    QName::new(Namespace::public(), name),
+                    Method::from_builtin(getter),
+                ));
+            }
+            if let Some(setter) = setter {
+                self.define_instance_trait(Trait::from_setter(
+                    QName::new(Namespace::public(), name),
+                    Method::from_builtin(setter),
+                ));
+            }
+        }
     }
 
     /// Define a trait on the class.
@@ -302,6 +450,20 @@ impl<'gc> Class<'gc> {
         known_traits: &mut Vec<Trait<'gc>>,
     ) -> Result<(), Error> {
         do_trait_lookup(name, known_traits, &self.class_traits)
+    }
+
+    /// Given a slot ID, append class traits matching the slot to a list of
+    /// known traits.
+    ///
+    /// This function adds its result onto the list of known traits, with the
+    /// caveat that duplicate entries will be replaced (if allowed). As such, this
+    /// function should be run on the class hierarchy from top to bottom.
+    ///
+    /// If a given trait has an invalid name, attempts to override a final trait,
+    /// or overlaps an existing trait without being an override, then this function
+    /// returns an error.
+    pub fn lookup_class_traits_by_slot(&self, id: u32) -> Result<Option<Trait<'gc>>, Error> {
+        do_trait_lookup_by_slot(id, &self.class_traits)
     }
 
     /// Determines if this class provides a given trait on itself.
@@ -357,6 +519,20 @@ impl<'gc> Class<'gc> {
         do_trait_lookup(name, known_traits, &self.instance_traits)
     }
 
+    /// Given a slot ID, append instance traits matching the slot to a list of
+    /// known traits.
+    ///
+    /// This function adds its result onto the list of known traits, with the
+    /// caveat that duplicate entries will be replaced (if allowed). As such, this
+    /// function should be run on the class hierarchy from top to bottom.
+    ///
+    /// If a given trait has an invalid name, attempts to override a final trait,
+    /// or overlaps an existing trait without being an override, then this function
+    /// returns an error.
+    pub fn lookup_instance_traits_by_slot(&self, id: u32) -> Result<Option<Trait<'gc>>, Error> {
+        do_trait_lookup_by_slot(id, &self.instance_traits)
+    }
+
     /// Determines if this class provides a given trait on its instances.
     pub fn has_instance_trait(&self, name: &QName<'gc>) -> bool {
         for trait_entry in self.instance_traits.iter() {
@@ -403,6 +579,6 @@ impl<'gc> Class<'gc> {
 
     /// Determine if this class is sealed (no dynamic properties)
     pub fn is_sealed(&self) -> bool {
-        self.attributes.0.contains(ClassAttributes::SEALED)
+        self.attributes.contains(ClassAttributes::SEALED)
     }
 }

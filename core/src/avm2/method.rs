@@ -5,7 +5,6 @@ use crate::avm2::object::Object;
 use crate::avm2::script::TranslationUnit;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::collect::CollectWrapper;
 use gc_arena::{Collect, CollectionContext, Gc, MutationContext};
 use std::fmt;
 use std::rc::Rc;
@@ -25,7 +24,8 @@ use swf::avm2::types::{AbcFile, Index, Method as AbcMethod, MethodBody as AbcMet
 /// resolve on the AVM stack, as if you had called a non-native function. If
 /// your function yields `None`, you must ensure that the top-most activation
 /// in the AVM1 runtime will return with the value of this function.
-pub type NativeMethod<'gc> = fn(
+
+pub type NativeMethod = for<'gc> fn(
     &mut Activation<'_, 'gc, '_>,
     Option<Object<'gc>>,
     &[Value<'gc>],
@@ -39,7 +39,8 @@ pub struct BytecodeMethod<'gc> {
     pub txunit: TranslationUnit<'gc>,
 
     /// The underlying ABC file of the above translation unit.
-    pub abc: CollectWrapper<Rc<AbcFile>>,
+    #[collect(require_static)]
+    pub abc: Rc<AbcFile>,
 
     /// The ABC method this function uses.
     pub abc_method: u32,
@@ -67,7 +68,7 @@ impl<'gc> BytecodeMethod<'gc> {
                         mc,
                         Self {
                             txunit,
-                            abc: CollectWrapper(txunit.abc()),
+                            abc: txunit.abc(),
                             abc_method: abc_method.0,
                             abc_method_body: Some(index as u32),
                         },
@@ -80,7 +81,7 @@ impl<'gc> BytecodeMethod<'gc> {
             mc,
             Self {
                 txunit,
-                abc: CollectWrapper(txunit.abc()),
+                abc: txunit.abc(),
                 abc_method: abc_method.0,
                 abc_method_body: None,
             },
@@ -99,7 +100,7 @@ impl<'gc> BytecodeMethod<'gc> {
 
     /// Get a reference to the ABC method entry this refers to.
     pub fn method(&self) -> &AbcMethod {
-        &self.abc.0.methods.get(self.abc_method as usize).unwrap()
+        self.abc.methods.get(self.abc_method as usize).unwrap()
     }
 
     /// Get a reference to the ABC method body entry this refers to.
@@ -107,7 +108,7 @@ impl<'gc> BytecodeMethod<'gc> {
     /// Some methods do not have bodies; this returns `None` in that case.
     pub fn body(&self) -> Option<&AbcMethodBody> {
         if let Some(abc_method_body) = self.abc_method_body {
-            self.abc.0.method_bodies.get(abc_method_body as usize)
+            self.abc.method_bodies.get(abc_method_body as usize)
         } else {
             None
         }
@@ -119,7 +120,7 @@ impl<'gc> BytecodeMethod<'gc> {
 #[derive(Clone)]
 pub enum Method<'gc> {
     /// A native method.
-    Native(NativeMethod<'gc>),
+    Native(NativeMethod),
 
     /// An ABC-provided method entry.
     Entry(Gc<'gc, BytecodeMethod<'gc>>),
@@ -146,8 +147,8 @@ impl<'gc> fmt::Debug for Method<'gc> {
     }
 }
 
-impl<'gc> From<NativeMethod<'gc>> for Method<'gc> {
-    fn from(nf: NativeMethod<'gc>) -> Self {
+impl<'gc> From<NativeMethod> for Method<'gc> {
+    fn from(nf: NativeMethod) -> Self {
         Self::Native(nf)
     }
 }
@@ -161,7 +162,7 @@ impl<'gc> From<Gc<'gc, BytecodeMethod<'gc>>> for Method<'gc> {
 impl<'gc> Method<'gc> {
     /// Builtin method constructor, because for some reason `nf.into()` just
     /// causes odd lifetime mismatches.
-    pub fn from_builtin(nf: NativeMethod<'gc>) -> Self {
+    pub fn from_builtin(nf: NativeMethod) -> Self {
         Self::Native(nf)
     }
 

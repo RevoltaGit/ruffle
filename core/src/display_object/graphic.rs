@@ -36,7 +36,7 @@ impl<'gc> Graphic<'gc> {
         swf_shape: swf::Shape,
         movie: Arc<SwfMovie>,
     ) -> Self {
-        let library = context.library.library_for_movie(movie.clone());
+        let library = context.library.library_for_movie(movie.clone()).unwrap();
         let static_data = GraphicStatic {
             id: swf_shape.id,
             bounds: swf_shape.shape_bounds.clone().into(),
@@ -115,7 +115,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
     }
 
     fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        if self.vm_type(context) == AvmType::Avm2 {
+        if self.avm_type() == AvmType::Avm2 && matches!(self.object2(), Avm2Value::Undefined) {
             let mut allocator = || {
                 let mut activation = Avm2Activation::from_nothing(context.reborrow());
                 let mut proto = activation.context.avm2.prototypes().shape;
@@ -146,18 +146,32 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
         }
     }
 
+    fn replace_with(&self, context: &mut UpdateContext<'_, 'gc, '_>, id: CharacterId) {
+        // Static assets like Graphics can replace themselves via a PlaceObject tag with PlaceObjectAction::Replace.
+        // This does not create a new instance, but instead swaps out the underlying static data to point to the new art.
+        if let Some(new_graphic) = context
+            .library
+            .library_for_movie_mut(self.movie().unwrap())
+            .get_graphic(id)
+        {
+            self.0.write(context.gc_context).static_data = new_graphic.0.read().static_data;
+        } else {
+            log::warn!("PlaceObject: expected Graphic at character ID {}", id);
+        }
+    }
+
     fn run_frame(&self, _context: &mut UpdateContext) {
         // Noop
     }
 
     fn render_self(&self, context: &mut RenderContext) {
-        if !self.world_bounds().intersects(&context.view_bounds) {
+        if !self.world_bounds().intersects(&context.stage.view_bounds()) {
             // Off-screen; culled
             return;
         }
 
         if let Some(drawing) = &self.0.read().drawing {
-            drawing.render(context, self.0.read().static_data.movie.clone());
+            drawing.render(context);
         } else if let Some(render_handle) = self.0.read().static_data.render_handle {
             context
                 .renderer
@@ -196,9 +210,21 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
         _instantiated_by: Instantiator,
         run_frame: bool,
     ) {
+        if self.avm_type() == AvmType::Avm1 {
+            context
+                .avm1
+                .add_to_exec_list(context.gc_context, (*self).into());
+        } else {
+            self.set_default_instance_name(context);
+        }
+
         if run_frame {
             self.run_frame(context);
         }
+    }
+
+    fn movie(&self) -> Option<Arc<SwfMovie>> {
+        self.0.read().static_data.movie.clone()
     }
 
     fn object2(&self) -> Avm2Value<'gc> {
@@ -207,6 +233,10 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
             .avm2_object
             .map(Avm2Value::from)
             .unwrap_or(Avm2Value::Undefined)
+    }
+
+    fn set_object2(&mut self, mc: MutationContext<'gc, '_>, to: Avm2Object<'gc>) {
+        self.0.write(mc).avm2_object = Some(to);
     }
 
     fn as_drawing(&self, gc_context: MutationContext<'gc, '_>) -> Option<RefMut<'_, Drawing>> {
@@ -219,7 +249,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
     }
 }
 
-/// Static data shared between all instances of a graphic.
+/// Static data shared between all instances of a Graphic.
 #[allow(dead_code)]
 #[derive(Collect)]
 #[collect(require_static)]

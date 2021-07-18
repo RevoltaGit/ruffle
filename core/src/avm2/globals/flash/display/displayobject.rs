@@ -2,15 +2,15 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
-use crate::avm2::method::Method;
+use crate::avm2::method::{Method, NativeMethod};
 use crate::avm2::names::{Namespace, QName};
 use crate::avm2::object::{LoaderInfoObject, Object, TObject};
 use crate::avm2::string::AvmString;
-use crate::avm2::traits::Trait;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::display_object::{DisplayObject, HitTestOptions, TDisplayObject};
 use crate::types::{Degrees, Percent};
+use crate::vminterface::Instantiator;
 use gc_arena::{GcCell, MutationContext};
 use swf::Twips;
 
@@ -20,8 +20,43 @@ pub fn instance_init<'gc>(
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
-    if let Some(this) = this {
+    if let Some(mut this) = this {
         activation.super_init(this, &[])?;
+
+        if this.as_display_object().is_none() {
+            let constructor = this
+                .get_property(
+                    this,
+                    &QName::new(Namespace::public(), "constructor"),
+                    activation,
+                )?
+                .coerce_to_object(activation)?;
+
+            if let Some((movie, symbol)) = activation
+                .context
+                .library
+                .avm2_constructor_registry()
+                .constr_symbol(constructor)
+            {
+                let mut child = activation
+                    .context
+                    .library
+                    .library_for_movie_mut(movie)
+                    .instantiate_by_id(symbol, activation.context.gc_context)?;
+
+                this.init_display_object(activation.context.gc_context, child);
+                child.set_object2(activation.context.gc_context, this);
+
+                child.post_instantiation(
+                    &mut activation.context,
+                    child,
+                    None,
+                    Instantiator::Avm2,
+                    false,
+                );
+                child.construct_frame(&mut activation.context);
+            }
+        }
     }
 
     Ok(Value::Undefined)
@@ -108,9 +143,10 @@ pub fn scale_y<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
     if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
-        return Ok(Value::Number(
-            dobj.scale_y(activation.context.gc_context).into_unit(),
-        ));
+        return Ok(dobj
+            .scale_y(activation.context.gc_context)
+            .into_unit()
+            .into());
     }
 
     Ok(Value::Undefined)
@@ -175,9 +211,10 @@ pub fn scale_x<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
     if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
-        return Ok(Value::Number(
-            dobj.scale_x(activation.context.gc_context).into_unit(),
-        ));
+        return Ok(dobj
+            .scale_x(activation.context.gc_context)
+            .into_unit()
+            .into());
     }
 
     Ok(Value::Undefined)
@@ -276,9 +313,9 @@ pub fn rotation<'gc>(
         let rem = rot % 360.0;
 
         if rem <= 180.0 {
-            return Ok(Value::Number(rem));
+            return Ok(rem.into());
         } else {
-            return Ok(Value::Number(rem - 360.0));
+            return Ok((rem - 360.0).into());
         }
     }
 
@@ -352,7 +389,7 @@ pub fn parent<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
         return Ok(dobj
-            .parent()
+            .avm2_parent()
             .map(|parent| parent.object2())
             .unwrap_or(Value::Null));
     }
@@ -368,8 +405,24 @@ pub fn root<'gc>(
 ) -> Result<Value<'gc>, Error> {
     if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
         return Ok(dobj
-            .root(&activation.context)
+            .avm2_root(&mut activation.context)
             .map(|root| root.object2())
+            .unwrap_or(Value::Null));
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// Implements `stage`.
+pub fn stage<'gc>(
+    activation: &mut Activation<'_, 'gc, '_>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error> {
+    if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
+        return Ok(dobj
+            .avm2_stage(&activation.context)
+            .map(|stage| stage.object2())
             .unwrap_or(Value::Null));
     }
 
@@ -468,10 +521,7 @@ pub fn hit_test_point<'gc>(
                 .hit_test_shape(
                     &mut activation.context,
                     (x, y),
-                    HitTestOptions {
-                        skip_mask: true,
-                        skip_invisible: false,
-                    },
+                    HitTestOptions::AVM_HIT_TEST,
                 )
                 .into());
         } else {
@@ -510,20 +560,31 @@ pub fn loader_info<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error> {
     if let Some(dobj) = this.and_then(|this| this.as_display_object()) {
-        if let Some(root) = dobj.root(&activation.context) {
+        if let Some(root) = dobj.avm2_root(&mut activation.context) {
             if DisplayObject::ptr_eq(root, dobj) {
                 let movie = dobj.movie();
 
                 if let Some(movie) = movie {
-                    return Ok(LoaderInfoObject::from_movie(
+                    let obj = LoaderInfoObject::from_movie(
                         movie,
                         root,
                         activation.context.avm2.prototypes().loaderinfo,
                         activation.context.gc_context,
-                    )?
-                    .into());
+                    )?;
+
+                    activation.super_init(obj, &[])?;
+
+                    return Ok(obj.into());
                 }
             }
+        }
+
+        if DisplayObject::ptr_eq(dobj, activation.context.stage.into()) {
+            return Ok(LoaderInfoObject::from_stage(
+                activation.context.avm2.prototypes().loaderinfo,
+                activation.context.gc_context,
+            )
+            .into());
         }
     }
 
@@ -542,114 +603,31 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
 
     let mut write = class.write(mc);
 
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "alpha"),
-        Method::from_builtin(alpha),
-    ));
-    write.define_instance_trait(Trait::from_setter(
-        QName::new(Namespace::public(), "alpha"),
-        Method::from_builtin(set_alpha),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "height"),
-        Method::from_builtin(height),
-    ));
-    write.define_instance_trait(Trait::from_setter(
-        QName::new(Namespace::public(), "height"),
-        Method::from_builtin(set_height),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "scaleY"),
-        Method::from_builtin(scale_y),
-    ));
-    write.define_instance_trait(Trait::from_setter(
-        QName::new(Namespace::public(), "scaleY"),
-        Method::from_builtin(set_scale_y),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "width"),
-        Method::from_builtin(width),
-    ));
-    write.define_instance_trait(Trait::from_setter(
-        QName::new(Namespace::public(), "width"),
-        Method::from_builtin(set_width),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "scaleX"),
-        Method::from_builtin(scale_x),
-    ));
-    write.define_instance_trait(Trait::from_setter(
-        QName::new(Namespace::public(), "scaleX"),
-        Method::from_builtin(set_scale_x),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "x"),
-        Method::from_builtin(x),
-    ));
-    write.define_instance_trait(Trait::from_setter(
-        QName::new(Namespace::public(), "x"),
-        Method::from_builtin(set_x),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "y"),
-        Method::from_builtin(y),
-    ));
-    write.define_instance_trait(Trait::from_setter(
-        QName::new(Namespace::public(), "y"),
-        Method::from_builtin(set_y),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "rotation"),
-        Method::from_builtin(rotation),
-    ));
-    write.define_instance_trait(Trait::from_setter(
-        QName::new(Namespace::public(), "rotation"),
-        Method::from_builtin(set_rotation),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "name"),
-        Method::from_builtin(name),
-    ));
-    write.define_instance_trait(Trait::from_setter(
-        QName::new(Namespace::public(), "name"),
-        Method::from_builtin(set_name),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "parent"),
-        Method::from_builtin(parent),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "root"),
-        Method::from_builtin(root),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "visible"),
-        Method::from_builtin(visible),
-    ));
-    write.define_instance_trait(Trait::from_setter(
-        QName::new(Namespace::public(), "visible"),
-        Method::from_builtin(set_visible),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "mouseX"),
-        Method::from_builtin(mouse_x),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "mouseY"),
-        Method::from_builtin(mouse_y),
-    ));
-    write.define_instance_trait(Trait::from_method(
-        QName::new(Namespace::public(), "hitTestPoint"),
-        Method::from_builtin(hit_test_point),
-    ));
-    write.define_instance_trait(Trait::from_method(
-        QName::new(Namespace::public(), "hitTestObject"),
-        Method::from_builtin(hit_test_object),
-    ));
-    write.define_instance_trait(Trait::from_getter(
-        QName::new(Namespace::public(), "loaderInfo"),
-        Method::from_builtin(loader_info),
-    ));
+    const PUBLIC_INSTANCE_PROPERTIES: &[(&str, Option<NativeMethod>, Option<NativeMethod>)] = &[
+        ("alpha", Some(alpha), Some(set_alpha)),
+        ("height", Some(height), Some(set_height)),
+        ("scaleY", Some(scale_y), Some(set_scale_y)),
+        ("width", Some(width), Some(set_width)),
+        ("scaleX", Some(scale_x), Some(set_scale_x)),
+        ("x", Some(x), Some(set_x)),
+        ("y", Some(y), Some(set_y)),
+        ("rotation", Some(rotation), Some(set_rotation)),
+        ("name", Some(name), Some(set_name)),
+        ("parent", Some(parent), None),
+        ("root", Some(root), None),
+        ("stage", Some(stage), None),
+        ("visible", Some(visible), Some(set_visible)),
+        ("mouseX", Some(mouse_x), None),
+        ("mouseY", Some(mouse_y), None),
+        ("loaderInfo", Some(loader_info), None),
+    ];
+    write.define_public_builtin_instance_properties(PUBLIC_INSTANCE_PROPERTIES);
+
+    const PUBLIC_INSTANCE_METHODS: &[(&str, NativeMethod)] = &[
+        ("hitTestPoint", hit_test_point),
+        ("hitTestObject", hit_test_object),
+    ];
+    write.define_public_builtin_instance_methods(PUBLIC_INSTANCE_METHODS);
 
     class
 }

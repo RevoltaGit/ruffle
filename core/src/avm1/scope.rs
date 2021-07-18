@@ -285,21 +285,38 @@ impl<'gc> Scope<'gc> {
             // Traverse the scope chain in search of the value.
             scope.set(name, value, activation, this)
         } else {
-            // This probably shouldn't happen -- all AVM1 code runs in reference to some movieclip,
-            // so we should always have a movieclip scope.
+            // This probably shouldn't happen -- all AVM1 code runs in reference to some MovieClip,
+            // so we should always have a MovieClip scope.
             // Define on the top-level scope.
             debug_assert!(false, "Scope::set: No top-level movie clip scope");
             self.locals().set(name, value, activation)
         }
     }
 
-    /// Set a particular value in the locals for this scope.
+    /// Define a named local variable on the scope.
     ///
-    /// By convention, the locals for a given function are always defined as
-    /// stored (e.g. not virtual) properties on the lowest object in the scope
-    /// chain. As a result, this function always force sets a property on the
-    /// local object and does not traverse the scope chain.
-    pub fn define(&self, name: &str, value: impl Into<Value<'gc>>, mc: MutationContext<'gc, '_>) {
+    /// If the property does not already exist on the local scope, it will created.
+    /// Otherwise, the existing property will be set to `value`. This does not crawl the scope
+    /// chain. Any proeprties with the same name deeper in the scope chain will be shadowed.
+    pub fn define_local(
+        &self,
+        name: &str,
+        value: impl Into<Value<'gc>>,
+        activation: &mut Activation<'_, 'gc, '_>,
+    ) -> Result<(), Error<'gc>> {
+        self.locals().set(name, value.into(), activation)
+    }
+
+    /// Create a local property on the activation.
+    ///
+    /// This inserts a value as a stored property on the local scope. If the property already
+    /// exists, it will be forcefully overwritten. Used internally to initialize objects.
+    pub fn force_define_local(
+        &self,
+        name: &str,
+        value: impl Into<Value<'gc>>,
+        mc: MutationContext<'gc, '_>,
+    ) {
         self.locals()
             .define_value(mc, name, value.into(), Attribute::empty());
     }

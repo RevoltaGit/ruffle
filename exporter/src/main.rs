@@ -23,7 +23,7 @@ use walkdir::{DirEntry, WalkDir};
 struct SizeOpt {
     /// The amount to scale the page size with
     #[clap(long = "scale", default_value = "1.0")]
-    scale: f32,
+    scale: f64,
 
     /// Optionally override the output width
     #[clap(long = "width")]
@@ -96,11 +96,17 @@ fn take_screenshot(
 ) -> Result<(Descriptors, Vec<RgbaImage>), Box<dyn std::error::Error>> {
     let movie = SwfMovie::from_path(&swf_path, None)?;
 
-    let width = size.width.unwrap_or_else(|| movie.width());
-    let width = (width as f32 * size.scale).round() as u32;
+    let width = size
+        .width
+        .map(f64::from)
+        .unwrap_or_else(|| movie.width().to_pixels());
+    let width = (width * size.scale).round() as u32;
 
-    let height = size.height.unwrap_or_else(|| movie.height());
-    let height = (height as f32 * size.scale).round() as u32;
+    let height = size
+        .height
+        .map(f64::from)
+        .unwrap_or_else(|| movie.height().to_pixels());
+    let height = (height * size.scale).round() as u32;
 
     let target = TextureTarget::new(&descriptors.device, (width, height));
     let player = Player::new(
@@ -117,7 +123,7 @@ fn take_screenshot(
     player
         .lock()
         .unwrap()
-        .set_viewport_dimensions(width, height);
+        .set_viewport_dimensions(width, height, size.scale as f64);
     player.lock().unwrap().set_root_movie(Arc::new(movie));
 
     let mut result = Vec::new();
@@ -125,7 +131,7 @@ fn take_screenshot(
 
     for i in 0..totalframes {
         if let Some(progress) = &progress {
-            progress.set_message(&format!(
+            progress.set_message(format!(
                 "{} frame {}",
                 swf_path.file_stem().unwrap().to_string_lossy(),
                 i
@@ -182,13 +188,13 @@ fn find_files(root: &Path, with_progress: bool) -> Vec<DirEntry> {
         if f_name.ends_with(".swf") {
             results.push(entry);
             if let Some(progress) = &progress {
-                progress.set_message(&format!("Searching for swf files... {}", results.len()));
+                progress.set_message(format!("Searching for swf files... {}", results.len()));
             }
         }
     }
 
     if let Some(progress) = &progress {
-        progress.finish_with_message(&format!("Found {} swf files to export", results.len()));
+        progress.finish_with_message(format!("Found {} swf files to export", results.len()));
     }
 
     results
@@ -197,11 +203,9 @@ fn find_files(root: &Path, with_progress: bool) -> Vec<DirEntry> {
 fn capture_single_swf(descriptors: Descriptors, opt: &Opt) -> Result<(), Box<dyn Error>> {
     let output = opt.output_path.clone().unwrap_or_else(|| {
         let mut result = PathBuf::new();
+        result.set_file_name(opt.swf.file_stem().unwrap());
         if opt.frames == 1 {
-            result.set_file_name(opt.swf.file_stem().unwrap());
             result.set_extension("png");
-        } else {
-            result.set_file_name(opt.swf.file_stem().unwrap());
         }
         result
     });
@@ -234,14 +238,14 @@ fn capture_single_swf(descriptors: Descriptors, opt: &Opt) -> Result<(), Box<dyn
     )?;
 
     if let Some(progress) = &progress {
-        progress.set_message(&opt.swf.file_stem().unwrap().to_string_lossy());
+        progress.set_message(opt.swf.file_stem().unwrap().to_string_lossy().into_owned());
     }
 
     if frames.len() == 1 {
         frames.get(0).unwrap().save(&output)?;
     } else {
         for (frame, image) in frames.iter().enumerate() {
-            let mut path = PathBuf::from(&output);
+            let mut path: PathBuf = (&output).into();
             path.push(format!("{}.png", frame));
             image.save(&path)?;
         }
@@ -263,7 +267,7 @@ fn capture_single_swf(descriptors: Descriptors, opt: &Opt) -> Result<(), Box<dyn
     };
 
     if let Some(progress) = progress {
-        progress.finish_with_message(&message);
+        progress.finish_with_message(message);
     } else {
         println!("{}", message);
     }
@@ -271,6 +275,7 @@ fn capture_single_swf(descriptors: Descriptors, opt: &Opt) -> Result<(), Box<dyn
     Ok(())
 }
 
+#[allow(unknown_lints, clippy::branches_sharing_code)]
 fn capture_multiple_swfs(mut descriptors: Descriptors, opt: &Opt) -> Result<(), Box<dyn Error>> {
     let output = opt.output_path.clone().unwrap();
     let files = find_files(&opt.swf, !opt.silent);
@@ -292,7 +297,7 @@ fn capture_multiple_swfs(mut descriptors: Descriptors, opt: &Opt) -> Result<(), 
     for file in &files {
         let (new_descriptors, frames) = take_screenshot(
             descriptors,
-            &file.path(),
+            file.path(),
             opt.frames,
             opt.skipframes,
             &progress,
@@ -301,17 +306,23 @@ fn capture_multiple_swfs(mut descriptors: Descriptors, opt: &Opt) -> Result<(), 
         descriptors = new_descriptors;
 
         if let Some(progress) = &progress {
-            progress.set_message(&file.path().file_stem().unwrap().to_string_lossy());
+            progress.set_message(
+                file.path()
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
 
         let mut relative_path = file
             .path()
             .strip_prefix(&opt.swf)
-            .unwrap_or_else(|_| &file.path())
+            .unwrap_or_else(|_| file.path())
             .to_path_buf();
 
         if frames.len() == 1 {
-            let mut destination = PathBuf::from(&output);
+            let mut destination: PathBuf = (&output).into();
             relative_path.set_extension("png");
             destination.push(relative_path);
             if let Some(parent) = destination.parent() {
@@ -319,7 +330,7 @@ fn capture_multiple_swfs(mut descriptors: Descriptors, opt: &Opt) -> Result<(), 
             }
             frames.get(0).unwrap().save(&destination)?;
         } else {
-            let mut parent = PathBuf::from(&output);
+            let mut parent: PathBuf = (&output).into();
             relative_path.set_extension("");
             parent.push(&relative_path);
             let _ = create_dir_all(&parent);
@@ -347,7 +358,7 @@ fn capture_multiple_swfs(mut descriptors: Descriptors, opt: &Opt) -> Result<(), 
     };
 
     if let Some(progress) = progress {
-        progress.finish_with_message(&message);
+        progress.finish_with_message(message);
     } else {
         println!("{}", message);
     }

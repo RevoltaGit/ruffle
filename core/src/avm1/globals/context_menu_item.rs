@@ -1,14 +1,17 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::object::TObject;
-use crate::avm1::property::Attribute;
+use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{AvmString, Object};
 use crate::avm1::{ScriptObject, Value};
 use gc_arena::MutationContext;
 
+const PROTO_DECLS: &[Declaration] = declare_properties! {
+    "copy" => method(copy; DONT_ENUM | DONT_DELETE);
+};
+
 pub fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
-
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -23,17 +26,17 @@ pub fn constructor<'gc>(
         .map(|v| v.to_owned().coerce_to_object(activation));
     let separator_before = args
         .get(2)
-        .unwrap_or(&Value::Bool(false))
+        .unwrap_or(&false.into())
         .to_owned()
         .as_bool(activation.swf_version());
     let enabled = args
         .get(3)
-        .unwrap_or(&Value::Bool(true))
+        .unwrap_or(&true.into())
         .to_owned()
         .as_bool(activation.swf_version());
     let visible = args
         .get(4)
-        .unwrap_or(&Value::Bool(true))
+        .unwrap_or(&true.into())
         .to_owned()
         .as_bool(activation.swf_version());
 
@@ -56,7 +59,6 @@ pub fn constructor<'gc>(
 
 pub fn copy<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
-
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -102,15 +104,7 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let mut object = ScriptObject::object(gc_context, Some(proto));
-
-    object.force_set_function(
-        "copy",
-        copy,
-        gc_context,
-        Attribute::DONT_ENUM | Attribute::DONT_DELETE,
-        Some(fn_proto),
-    );
-
+    let object = ScriptObject::object(gc_context, Some(proto));
+    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     object.into()
 }

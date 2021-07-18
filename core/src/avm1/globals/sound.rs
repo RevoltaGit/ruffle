@@ -3,13 +3,32 @@
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::function::{Executable, FunctionObject};
-use crate::avm1::property::Attribute;
+use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, SoundObject, TObject, Value};
 use crate::avm_warn;
 use crate::character::Character;
 use crate::display_object::{SoundTransform, TDisplayObject};
 use gc_arena::MutationContext;
+
+const PROTO_DECLS: &[Declaration] = declare_properties! {
+    "attachSound" => method(attach_sound; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "duration" => property(duration; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getDuration" => method(duration; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "setDuration" => method(set_duration; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "id3" => method(id3; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getBytesLoaded" => method(get_bytes_loaded; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getBytesTotal" => method(get_bytes_total; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getPan" => method(get_pan; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getTransform" => method(get_transform; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "getVolume" => method(get_volume; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "loadSound" => method(load_sound; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "position" => property(position; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "setPan" => method(set_pan; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "setTransform" => method(set_transform; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "setVolume" => method(set_volume; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "start" => method(start; DONT_ENUM | DONT_DELETE | READ_ONLY);
+    "stop" => method(stop; DONT_ENUM | DONT_DELETE | READ_ONLY);
+};
 
 /// Implements `Sound`
 pub fn constructor<'gc>(
@@ -38,144 +57,10 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let object = SoundObject::empty_sound(gc_context, Some(proto));
-
-    object.as_script_object().unwrap().force_set_function(
-        "attachSound",
-        attach_sound,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.add_property(
-        gc_context,
-        "duration",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(duration),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-    );
-
-    object.add_property(
-        gc_context,
-        "id3",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(id3),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "getBytesLoaded",
-        get_bytes_loaded,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "getBytesTotal",
-        get_bytes_total,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "getPan",
-        get_pan,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "getTransform",
-        get_transform,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "getVolume",
-        get_volume,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "loadSound",
-        load_sound,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.add_property(
-        gc_context,
-        "position",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(position),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        None,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "setPan",
-        set_pan,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "setTransform",
-        set_transform,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "setVolume",
-        set_volume,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "start",
-        start,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.as_script_object().unwrap().force_set_function(
-        "stop",
-        stop,
-        gc_context,
-        Attribute::DONT_DELETE | Attribute::READ_ONLY | Attribute::DONT_ENUM,
-        Some(fn_proto),
-    );
-
-    object.into()
+    let sound = SoundObject::empty_sound(gc_context, Some(proto));
+    let object = sound.as_script_object().unwrap();
+    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
+    sound.into()
 }
 
 fn attach_sound<'gc>(
@@ -188,8 +73,8 @@ fn attach_sound<'gc>(
         let name = name.coerce_to_string(activation)?;
         let movie = sound_object
             .owner()
-            .or_else(|| activation.context.levels.get(&0).copied())
-            .and_then(|o| o.movie());
+            .unwrap_or_else(|| activation.context.stage.root_clip())
+            .movie();
         if let Some(movie) = movie {
             if let Some(Character::Sound(sound)) = activation
                 .context
@@ -200,11 +85,7 @@ fn attach_sound<'gc>(
                 sound_object.set_sound(activation.context.gc_context, Some(*sound));
                 sound_object.set_duration(
                     activation.context.gc_context,
-                    activation
-                        .context
-                        .audio
-                        .get_sound_duration(*sound)
-                        .unwrap_or(0),
+                    activation.context.audio.get_sound_duration(*sound),
                 );
                 sound_object.set_position(activation.context.gc_context, 0);
             } else {
@@ -228,9 +109,11 @@ fn duration<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.current_swf_version() >= 6 {
+    if activation.swf_version() >= 6 {
         if let Some(sound_object) = this.as_sound_object() {
-            return Ok(sound_object.duration().into());
+            return Ok(sound_object
+                .duration()
+                .map_or(Value::Undefined, |d| d.into()));
         } else {
             avm_warn!(activation, "Sound.duration: this is not a Sound");
         }
@@ -239,12 +122,20 @@ fn duration<'gc>(
     Ok(Value::Undefined)
 }
 
+fn set_duration<'gc>(
+    _activation: &mut Activation<'_, 'gc, '_>,
+    _this: Object<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    Ok(Value::Undefined)
+}
+
 fn get_bytes_loaded<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.current_swf_version() >= 6 {
+    if activation.swf_version() >= 6 {
         avm_warn!(activation, "Sound.getBytesLoaded: Unimplemented");
         Ok(1.into())
     } else {
@@ -257,7 +148,7 @@ fn get_bytes_total<'gc>(
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.current_swf_version() >= 6 {
+    if activation.swf_version() >= 6 {
         avm_warn!(activation, "Sound.getBytesTotal: Unimplemented");
         Ok(1.into())
     } else {
@@ -336,7 +227,7 @@ fn id3<'gc>(
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.current_swf_version() >= 6 {
+    if activation.swf_version() >= 6 {
         avm_warn!(activation, "Sound.id3: Unimplemented");
     }
     Ok(Value::Undefined)
@@ -347,7 +238,7 @@ fn load_sound<'gc>(
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.current_swf_version() >= 6 {
+    if activation.swf_version() >= 6 {
         avm_warn!(activation, "Sound.loadSound: Unimplemented");
     }
     Ok(Value::Undefined)
@@ -358,7 +249,7 @@ fn position<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if activation.current_swf_version() >= 6 {
+    if activation.swf_version() >= 6 {
         if let Some(sound_object) = this.as_sound_object() {
             // TODO: The position is "sticky"; even if the sound is no longer playing, it should return
             // the previous valid position.
@@ -469,14 +360,8 @@ fn start<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let start_offset = args
-        .get(0)
-        .unwrap_or(&Value::Number(0.0))
-        .coerce_to_f64(activation)?;
-    let loops = args
-        .get(1)
-        .unwrap_or(&Value::Number(1.0))
-        .coerce_to_f64(activation)?;
+    let start_offset = args.get(0).unwrap_or(&0.into()).coerce_to_f64(activation)?;
+    let loops = args.get(1).unwrap_or(&1.into()).coerce_to_f64(activation)?;
 
     // TODO: Handle loops > u16::MAX.
     let loops = (loops as u16).max(1);
@@ -525,8 +410,8 @@ fn stop<'gc>(
             let name = name.coerce_to_string(activation)?;
             let movie = sound
                 .owner()
-                .or_else(|| activation.context.levels.get(&0).copied())
-                .and_then(|o| o.movie());
+                .unwrap_or_else(|| activation.context.stage.root_clip())
+                .movie();
             if let Some(movie) = movie {
                 if let Some(Character::Sound(sound)) = activation
                     .context

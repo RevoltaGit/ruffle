@@ -1,8 +1,8 @@
-use crate::bounding_box::BoundingBox;
+use crate::{bounding_box::BoundingBox, matrix::Matrix};
 use fnv::FnvHashMap;
 use smallvec::SmallVec;
 use std::num::NonZeroU32;
-use swf::{CharacterId, FillStyle, LineStyle, Matrix, Shape, ShapeRecord, Twips};
+use swf::{CharacterId, FillStyle, LineStyle, Shape, ShapeRecord, Twips};
 
 pub fn calculate_shape_bounds(shape_records: &[swf::ShapeRecord]) -> swf::Rectangle {
     let mut bounds = swf::Rectangle {
@@ -11,8 +11,8 @@ pub fn calculate_shape_bounds(shape_records: &[swf::ShapeRecord]) -> swf::Rectan
         x_max: Twips::new(i32::MIN),
         y_max: Twips::new(i32::MIN),
     };
-    let mut x = Twips::zero();
-    let mut y = Twips::zero();
+    let mut x = Twips::ZERO;
+    let mut y = Twips::ZERO;
     for record in shape_records {
         match record {
             swf::ShapeRecord::StyleChange(style_change) => {
@@ -359,8 +359,8 @@ impl<'a> ShapeConverter<'a> {
         ShapeConverter {
             iter: shape.shape.iter(),
 
-            x: Twips::zero(),
-            y: Twips::zero(),
+            x: Twips::ZERO,
+            y: Twips::ZERO,
 
             fill_styles: &shape.styles.fill_styles,
             line_styles: &shape.styles.line_styles,
@@ -377,7 +377,7 @@ impl<'a> ShapeConverter<'a> {
     }
 
     fn into_commands(mut self) -> Vec<DrawPath<'a>> {
-        // as u32 is okay because SWF has a max of 65536 fills (TODO: should be u16?)
+        // As u32 is okay because SWF has a max of 65536 fills (TODO: should be u16?)
         let mut num_fill_styles = self.fill_styles.len() as u32;
         let mut num_line_styles = self.line_styles.len() as u32;
         while let Some(record) = self.iter.next() {
@@ -748,14 +748,14 @@ pub fn shape_hit_test(
     local_matrix: &Matrix,
 ) -> bool {
     // Transform point to local space.
-    let mut x = Twips::zero();
-    let mut y = Twips::zero();
+    let mut x = Twips::ZERO;
+    let mut y = Twips::ZERO;
     let mut winding = 0;
 
     let mut has_fill_style0: bool = false;
     let mut has_fill_style1: bool = false;
 
-    let min_width = f64::from(stroke_minimum_width(local_matrix));
+    let min_width = stroke_minimum_width(local_matrix);
     let mut stroke_width = None;
     let mut line_styles = &shape.styles.line_styles;
 
@@ -855,13 +855,13 @@ pub fn shape_hit_test(
     winding & 0b1 != 0
 }
 
-/// Test whether the given point is contained with in the paths specified by the draw commands.
+/// Test whether the given point is contained within the paths specified by the draw commands.
 pub fn draw_command_fill_hit_test(
     commands: &[DrawCommand],
     (point_x, point_y): (Twips, Twips),
 ) -> bool {
-    let mut x = Twips::zero();
-    let mut y = Twips::zero();
+    let mut x = Twips::ZERO;
+    let mut y = Twips::ZERO;
     let mut winding = 0;
 
     // Draw command only contains a single fill, so don't have to worry about fill styles.
@@ -886,7 +886,7 @@ pub fn draw_command_fill_hit_test(
     winding & 0b1 != 0
 }
 
-/// Test whether the given point is contained with in the strokes specified by the draw commands.
+/// Test whether the given point is contained within the strokes specified by the draw commands.
 /// local_matrix is used to calculate the minimum stroke width.
 pub fn draw_command_stroke_hit_test(
     commands: &[DrawCommand],
@@ -894,7 +894,7 @@ pub fn draw_command_stroke_hit_test(
     (point_x, point_y): (Twips, Twips),
     local_matrix: &Matrix,
 ) -> bool {
-    let stroke_min_width = f64::from(stroke_minimum_width(local_matrix));
+    let stroke_min_width = stroke_minimum_width(local_matrix);
     let stroke_width = 0.5 * f64::max(stroke_width.get().into(), stroke_min_width);
     let stroke_widths = (stroke_width, stroke_width * stroke_width);
     let mut x = Twips::default();
@@ -935,10 +935,10 @@ pub fn draw_command_stroke_hit_test(
 /// TODO: Verify the actual behavior; I think it's more like the average between scaleX and scaleY.
 /// Does not yet support vertical/horizontal stroke scaling flags.
 /// This might be better to add as a method to Matrix.
-fn stroke_minimum_width(matrix: &Matrix) -> f32 {
+fn stroke_minimum_width(matrix: &Matrix) -> f64 {
     let sx = (matrix.a * matrix.a + matrix.b * matrix.b).sqrt();
     let sy = (matrix.c * matrix.c + matrix.d * matrix.d).sqrt();
-    let scale = sx.max(sy);
+    let scale: f64 = sx.max(sy).into();
     20.0 * scale
 }
 
@@ -1307,11 +1307,9 @@ fn solve_cubic(a: f64, b: f64, c: f64, d: f64) -> SmallVec<[f64; 3]> {
 
         let t0 = gamma1 + gamma2 - offset;
         let t1 = -0.5 * (gamma1 + gamma2) - offset;
+        roots.push(t0);
         if disc == 0.0 {
-            roots.push(t0);
             roots.push(t1);
-        } else {
-            roots.push(t0);
         }
     }
 

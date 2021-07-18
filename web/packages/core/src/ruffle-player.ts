@@ -11,6 +11,8 @@ import {
     AutoPlay,
     UnmuteOverlay,
 } from "./load-options";
+import { MovieMetadata } from "./movie-metadata";
+import { InternalContextMenuItem } from "./context-menu";
 
 export const FLASH_MIMETYPE = "application/x-shockwave-flash";
 export const FUTURESPLASH_MIMETYPE = "application/futuresplash";
@@ -24,10 +26,13 @@ const DIMENSION_REGEX = /^\s*(\d+(\.\d+)?(%)?)/;
 
 enum PanicError {
     Unknown,
+    CSPConflict,
     FileProtocol,
+    InvalidWasm,
     JavascriptConfiguration,
     JavascriptConflict,
     WasmCors,
+    WasmDownload,
     WasmMimeType,
     WasmNotFound,
 }
@@ -65,11 +70,11 @@ interface ContextMenuItem {
     onClick: (event: MouseEvent) => void;
 
     /**
-     * Whether to add a separator right after the item
+     * Whether the item is clickable
      *
      * @default true
      */
-    separator?: boolean;
+    enabled?: boolean;
 }
 
 /**
@@ -124,12 +129,20 @@ export class RufflePlayer extends HTMLElement {
     private swfUrl?: string;
     private instance: Ruffle | null;
     private options: BaseLoadOptions | null;
-    private _trace_observer: ((message: string) => void) | null;
     private lastActivePlayingState: boolean;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    private ruffleConstructor: Promise<{ new (...args: any[]): Ruffle }>;
+    private _metadata: MovieMetadata | null;
+    private _readyState: ReadyState;
+
+    private ruffleConstructor: Promise<typeof Ruffle>;
     private panicked = false;
+
+    /**
+     * Triggered when a movie metadata has been loaded (such as movie width and height).
+     *
+     * @event RufflePlayer#loadedmetadata
+     */
+    static LOADED_METADATA = "loadedmetadata";
 
     /**
      * A movie can communicate with the hosting page using fscommand
@@ -148,6 +161,26 @@ export class RufflePlayer extends HTMLElement {
     config: Config = {};
 
     /**
+     * Indicates the readiness of the playing movie.
+     *
+     * @returns The `ReadyState` of the player.
+     */
+    get readyState(): ReadyState {
+        return this._readyState;
+    }
+
+    /**
+     * The metadata of the playing movie (such as movie width and height).
+     * These are inherent properties stored in the SWF file and are not affected by runtime changes.
+     * For example, `metadata.width` is the width of the SWF file, and not the width of the Ruffle player.
+     *
+     * @returns The metadata of the movie, or `null` if the movie metadata has not yet loaded.
+     */
+    get metadata(): MovieMetadata | null {
+        return this._metadata;
+    }
+
+    /**
      * Constructs a new Ruffle flash player for insertion onto the page.
      */
     constructor() {
@@ -162,17 +195,10 @@ export class RufflePlayer extends HTMLElement {
         this.container = this.shadow.getElementById("container")!;
         this.playButton = this.shadow.getElementById("play_button")!;
         if (this.playButton) {
-            this.playButton.addEventListener(
-                "click",
-                this.playButtonClicked.bind(this)
-            );
+            this.playButton.addEventListener("click", () => this.play());
         }
 
         this.unmuteOverlay = this.shadow.getElementById("unmute_overlay")!;
-        this.unmuteOverlay.addEventListener(
-            "click",
-            this.unmuteOverlayClicked.bind(this)
-        );
 
         this.contextMenuElement = this.shadow.getElementById("context-menu")!;
         this.addEventListener("contextmenu", this.showContextMenu.bind(this));
@@ -182,7 +208,9 @@ export class RufflePlayer extends HTMLElement {
         this.instance = null;
         this.options = null;
         this.onFSCommand = null;
-        this._trace_observer = null;
+
+        this._readyState = ReadyState.HaveNothing;
+        this._metadata = null;
 
         this.ruffleConstructor = loadRuffle();
 
@@ -257,11 +285,7 @@ export class RufflePlayer extends HTMLElement {
      * @internal
      */
     disconnectedCallback(): void {
-        if (this.instance) {
-            this.instance.destroy();
-            this.instance = null;
-            console.log("Ruffle instance destroyed.");
-        }
+        this.destroy();
     }
 
     /**
@@ -343,11 +367,7 @@ export class RufflePlayer extends HTMLElement {
      * @private
      */
     private async ensureFreshInstance(config: BaseLoadOptions): Promise<void> {
-        if (this.instance) {
-            this.instance.destroy();
-            this.instance = null;
-            console.log("Ruffle instance destroyed.");
-        }
+        this.destroy();
 
         const ruffleConstructor = await this.ruffleConstructor.catch((e) => {
             console.error(`Serious error loading Ruffle: ${e}`);
@@ -365,6 +385,18 @@ export class RufflePlayer extends HTMLElement {
                     message.includes("failed to fetch")
                 ) {
                     e.ruffleIndexError = PanicError.WasmCors;
+                } else if (message.includes("disallowed by embedder")) {
+                    e.ruffleIndexError = PanicError.CSPConflict;
+                } else if (
+                    message.includes("webassembly.instantiate") &&
+                    e.name === "CompileError"
+                ) {
+                    e.ruffleIndexError = PanicError.InvalidWasm;
+                } else if (
+                    message.includes("could not download wasm module") &&
+                    e.name === "TypeError"
+                ) {
+                    e.ruffleIndexError = PanicError.WasmDownload;
                 } else if (
                     !message.includes("magic") &&
                     (e.name === "CompileError" || e.name === "TypeError")
@@ -410,19 +442,17 @@ export class RufflePlayer extends HTMLElement {
             this.play();
 
             if (this.audioState() !== "running") {
-                this.unmuteOverlay.style.display = "block";
+                if (unmuteVisibility === UnmuteOverlay.Visible) {
+                    this.unmuteOverlay.style.display = "block";
+                }
 
-                // We need to mark each child as hidden or visible, as we want an overlay even if it's "hidden".
-                // We need to undo this later if the config changed back to visible, but we already hid them.
-                this.unmuteOverlay.childNodes.forEach((node) => {
-                    if ("style" in node) {
-                        const style = (<ElementCSSInlineStyle>node).style;
-                        style.visibility =
-                            unmuteVisibility == UnmuteOverlay.Visible
-                                ? ""
-                                : "hidden";
+                this.container.addEventListener(
+                    "click",
+                    this.unmuteOverlayClicked.bind(this),
+                    {
+                        once: true,
                     }
-                });
+                );
 
                 const audioContext = this.instance?.audio_context();
                 if (audioContext) {
@@ -436,6 +466,19 @@ export class RufflePlayer extends HTMLElement {
             }
         } else {
             this.playButton.style.display = "block";
+        }
+    }
+
+    /**
+     * Destroys the currently running instance of Ruffle.
+     */
+    private destroy(): void {
+        if (this.instance) {
+            this.instance.destroy();
+            this.instance = null;
+            this._metadata = null;
+            this._readyState = ReadyState.HaveNothing;
+            console.log("Ruffle instance destroyed.");
         }
     }
 
@@ -542,10 +585,6 @@ export class RufflePlayer extends HTMLElement {
         }
     }
 
-    private playButtonClicked(): void {
-        this.play();
-    }
-
     /**
      * Plays or resumes the movie.
      */
@@ -620,8 +659,27 @@ export class RufflePlayer extends HTMLElement {
         }
     }
 
-    private contextMenuItems(): ContextMenuItem[] {
+    private contextMenuItems(): Array<ContextMenuItem | null> {
+        const CHECKMARK = String.fromCharCode(0x2713);
         const items = [];
+
+        if (this.instance) {
+            const customItems: InternalContextMenuItem[] =
+                this.instance.prepare_context_menu();
+            customItems.forEach((item, index) => {
+                if (item.separatorBefore) items.push(null);
+                items.push({
+                    // TODO: better checkboxes
+                    text:
+                        item.caption + (item.checked ? ` (${CHECKMARK})` : ``),
+                    onClick: () =>
+                        this.instance?.run_context_menu_callback(index),
+                    enabled: item.enabled,
+                });
+            });
+        }
+        items.push(null);
+
         if (this.fullscreenEnabled) {
             if (this.isFullscreen) {
                 items.push({
@@ -635,12 +693,12 @@ export class RufflePlayer extends HTMLElement {
                 });
             }
         }
+        items.push(null);
         items.push({
             text: `About Ruffle (%VERSION_NAME%)`,
             onClick() {
                 window.open(RUFFLE_ORIGIN, "_blank");
             },
-            separator: false,
         });
         return items;
     }
@@ -660,19 +718,33 @@ export class RufflePlayer extends HTMLElement {
         }
 
         // Populate context menu items.
-        for (const { text, onClick, separator } of this.contextMenuItems()) {
-            const menuItem = document.createElement("li");
-            menuItem.className = "menu_item active";
-            menuItem.textContent = text;
-            menuItem.addEventListener("click", onClick);
-            this.contextMenuElement.appendChild(menuItem);
+        for (const item of this.contextMenuItems()) {
+            if (item === null) {
+                if (!this.contextMenuElement.lastElementChild) continue; // don't start with separators
+                if (
+                    this.contextMenuElement.lastElementChild.classList.contains(
+                        "menu_separator"
+                    )
+                )
+                    continue; // don't repeat separators
 
-            if (separator !== false) {
                 const menuSeparator = document.createElement("li");
                 menuSeparator.className = "menu_separator";
                 const hr = document.createElement("hr");
                 menuSeparator.appendChild(hr);
                 this.contextMenuElement.appendChild(menuSeparator);
+            } else {
+                const { text, onClick, enabled } = item;
+                const menuItem = document.createElement("li");
+                menuItem.className = "menu_item";
+                menuItem.textContent = text;
+                this.contextMenuElement.appendChild(menuItem);
+
+                if (enabled !== false) {
+                    menuItem.addEventListener("click", onClick);
+                } else {
+                    menuItem.classList.add("disabled");
+                }
             }
         }
 
@@ -695,6 +767,7 @@ export class RufflePlayer extends HTMLElement {
     }
 
     private hideContextMenu(): void {
+        this.instance?.clear_custom_menu_items();
         this.contextMenuElement.style.display = "none";
     }
 
@@ -740,7 +813,6 @@ export class RufflePlayer extends HTMLElement {
      * Used by the polyfill elements, RuffleObject and RuffleEmbed.
      *
      * @param elem The element to copy all attributes from.
-     *
      * @protected
      */
     protected copyElement(elem: HTMLElement): void {
@@ -984,6 +1056,29 @@ export class RufflePlayer extends HTMLElement {
                     <li><a href="#" id="panic-view-details">View Error Details</a></li>
                 `;
                 break;
+            case PanicError.InvalidWasm:
+                // Self hosted: Cannot load `.wasm` file - incorrect configuration or missing files
+                errorBody = `
+                    <p>Ruffle has encountered a major issue whilst trying to initialize.</p>
+                    <p>It seems like this page has missing or invalid files for running Ruffle.</p>
+                    <p>If you are the server administrator, please consult the Ruffle wiki for help.</p>
+                `;
+                errorFooter = `
+                    <li><a target="_top" href="https://github.com/ruffle-rs/ruffle/wiki/Using-Ruffle#addressing-a-compileerror">View Ruffle Wiki</a></li>
+                    <li><a href="#" id="panic-view-details">View Error Details</a></li>
+                `;
+                break;
+            case PanicError.WasmDownload:
+                // Usually a transient network error or botched deployment
+                errorBody = `
+                    <p>Ruffle has encountered a major issue whilst trying to initialize.</p>
+                    <p>This can often resolve itself, so you can try reloading the page.</p>
+                    <p>Otherwise, please contact the website administrator.</p>
+                `;
+                errorFooter = `
+                    <li><a href="#" id="panic-view-details">View Error Details</a></li>
+                `;
+                break;
             case PanicError.JavascriptConflict:
                 // Self hosted: Cannot load `.wasm` file - a native object / function is overriden
                 errorBody = `
@@ -993,6 +1088,18 @@ export class RufflePlayer extends HTMLElement {
                 `;
                 errorFooter = `
                     <li><a target="_top" href="${issueLink}">Report Bug</a></li>
+                    <li><a href="#" id="panic-view-details">View Error Details</a></li>
+                `;
+                break;
+            case PanicError.CSPConflict:
+                // General error: Cannot load `.wasm` file - a native object / function is overriden
+                errorBody = `
+                    <p>Ruffle has encountered a major issue whilst trying to initialize.</p>
+                    <p>This web server's Content Security Policy does not allow the required ".wasm" component to run.</p>
+                    <p>If you are the server administrator, please consult the Ruffle wiki for help.</p>
+                `;
+                errorFooter = `
+                    <li><a target="_top" href="https://github.com/ruffle-rs/ruffle/wiki/Using-Ruffle#configure-wasm-csp">View Ruffle Wiki</a></li>
                     <li><a href="#" id="panic-view-details">View Error Details</a></li>
                 `;
                 break;
@@ -1032,10 +1139,7 @@ export class RufflePlayer extends HTMLElement {
         }
 
         // Do this last, just in case it causes any cascading issues.
-        if (this.instance) {
-            this.instance.destroy();
-            this.instance = null;
-        }
+        this.destroy();
     }
 
     displayUnsupportedMessage(): void {
@@ -1047,7 +1151,7 @@ export class RufflePlayer extends HTMLElement {
             <p>Flash Player has been removed from browsers in 2021.</p>
             <p>This content is not yet supported by the Ruffle emulator and will likely not run as intended.</p>
             <div>
-                <a target="_top" class="more-info-link" href="https://github.com/ruffle-rs/ruffle/wiki/Frequently-Asked-Questions-For-Users">More info</a>
+                <a target="_blank" class="more-info-link" href="https://github.com/ruffle-rs/ruffle/wiki/Frequently-Asked-Questions-For-Users">More info</a>
                 <button id="run-anyway-btn">Run anyway</button>
             </div>
         </div>`;
@@ -1081,6 +1185,33 @@ export class RufflePlayer extends HTMLElement {
             this.options?.allowScriptAccess ?? false
         }\n`;
     }
+
+    private setMetadata(metadata: MovieMetadata) {
+        this._metadata = metadata;
+        // TODO: Switch this to ReadyState.Loading when we have streaming support.
+        this._readyState = ReadyState.Loaded;
+        this.dispatchEvent(new Event(RufflePlayer.LOADED_METADATA));
+    }
+}
+
+/**
+ * Describes the loading state of an SWF movie.
+ */
+export enum ReadyState {
+    /**
+     * No movie is loaded, or no information is yet available about the movie.
+     */
+    HaveNothing = 0,
+
+    /**
+     * The movie is still loading, but it has started playback, and metadata is available.
+     */
+    Loading = 1,
+
+    /**
+     * The movie has completely loaded.
+     */
+    Loaded = 2,
 }
 
 /**

@@ -5,7 +5,9 @@ use crate::avm2::class::Class;
 use crate::avm2::method::BytecodeMethod;
 use crate::avm2::method::Method;
 use crate::avm2::names::{Multiname, Namespace, QName};
-use crate::avm2::object::{ArrayObject, FunctionObject, NamespaceObject, ScriptObject};
+use crate::avm2::object::{
+    ArrayObject, ByteArrayObject, FunctionObject, NamespaceObject, ScriptObject,
+};
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::scope::Scope;
 use crate::avm2::script::Script;
@@ -16,6 +18,7 @@ use crate::context::UpdateContext;
 use crate::swf::extensions::ReadSwfExt;
 use gc_arena::{Gc, GcCell, MutationContext};
 use smallvec::SmallVec;
+use std::convert::{TryFrom, TryInto};
 use swf::avm2::read::Reader;
 use swf::avm2::types::{
     Class as AbcClass, Index, Method as AbcMethod, Multiname as AbcMultiname,
@@ -77,6 +80,9 @@ pub struct Activation<'a, 'gc: 'a, 'gc_context: 'a> {
     /// activation frame is a programming error.
     is_executing: bool,
 
+    /// Amount of actions performed since the last timeout check
+    actions_since_timeout_check: u16,
+
     /// Local registers.
     ///
     /// All activations have local registers, but it is possible for multiple
@@ -104,6 +110,16 @@ pub struct Activation<'a, 'gc: 'a, 'gc_context: 'a> {
     /// This will not be available if this is not a method call.
     base_proto: Option<Object<'gc>>,
 
+    /// The proto of all objects returned from `newactivation`.
+    ///
+    /// In method calls that call for an activation object, this will be
+    /// configured as the anonymous class whose traits match the method's
+    /// declared traits.
+    ///
+    /// If this is `None`, then the method did not ask for an activation object
+    /// and we will not construct a prototype for one.
+    activation_proto: Option<Object<'gc>>,
+
     pub context: UpdateContext<'a, 'gc, 'gc_context>,
 }
 
@@ -123,11 +139,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             this: None,
             arguments: None,
             is_executing: false,
+            actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
             local_scope: ScriptObject::bare_object(context.gc_context),
             scope: None,
             base_proto: None,
+            activation_proto: None,
             context,
         }
     }
@@ -162,11 +180,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             this: Some(script_scope),
             arguments: None,
             is_executing: false,
+            actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
             local_scope: ScriptObject::bare_object(context.gc_context),
             scope,
             base_proto: None,
+            activation_proto: None,
             context,
         })
     }
@@ -185,7 +205,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         let body: Result<_, Error> = method
             .body()
             .ok_or_else(|| "Cannot execute non-native method without body".into());
-        let num_locals = body?.num_locals;
+        let body = body?;
+        let num_locals = body.num_locals;
         let has_rest_or_args = method.method().needs_arguments_object || method.method().needs_rest;
         let arg_register = if has_rest_or_args { 1 } else { 0 };
         let num_declared_arguments = method.method().params.len() as u32;
@@ -206,15 +227,37 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             }
         }
 
+        let activation_proto = if method.method().needs_activation {
+            let translation_unit = method.translation_unit();
+            let abc_method = method.method();
+            let activation_class = Class::from_method_body(
+                context.avm2,
+                context.gc_context,
+                translation_unit,
+                abc_method,
+                body,
+            )?;
+
+            Some(ScriptObject::bare_prototype(
+                context.gc_context,
+                activation_class,
+                scope,
+            ))
+        } else {
+            None
+        };
+
         let mut activation = Self {
             this,
             arguments: None,
             is_executing: false,
+            actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
             local_scope: ScriptObject::bare_object(context.gc_context),
             scope,
             base_proto,
+            activation_proto,
             context,
         };
 
@@ -283,11 +326,13 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             this,
             arguments: None,
             is_executing: false,
+            actions_since_timeout_check: 0,
             local_registers,
             return_value: None,
             local_scope: ScriptObject::bare_object(context.gc_context),
             scope,
             base_proto,
+            activation_proto: None,
             context,
         })
     }
@@ -314,7 +359,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         }
 
         scope
-            .map(|s| s.read().locals().clone().into())
+            .map(|s| (*s.read().locals()).into())
             .unwrap_or(Value::Undefined)
     }
 
@@ -337,7 +382,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             .get_property(receiver, &name, self)?
             .coerce_to_object(self)?;
 
-        function.call(Some(receiver), &args, self, Some(base_proto))
+        function.call(Some(receiver), args, self, Some(base_proto))
     }
 
     /// Attempts to lock the activation frame for execution.
@@ -527,11 +572,15 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         reader: &mut Reader<'b>,
         full_data: &'b [u8],
     ) -> Result<FrameControl<'gc>, Error> {
-        if self.context.update_start.elapsed() >= self.context.max_execution_duration {
-            return Err(
-                "A script in this movie has taken too long to execute and has been terminated."
-                    .into(),
-            );
+        self.actions_since_timeout_check += 1;
+        if self.actions_since_timeout_check >= 2000 {
+            self.actions_since_timeout_check = 0;
+            if self.context.update_start.elapsed() >= self.context.max_execution_duration {
+                return Err(
+                    "A script in this movie has taken too long to execute and has been terminated."
+                        .into(),
+                );
+            }
         }
 
         let instruction_start = reader.pos(full_data);
@@ -670,6 +719,8 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                 Op::NextValue => self.op_next_value(),
                 Op::IsType { index } => self.op_is_type(method, index),
                 Op::IsTypeLate => self.op_is_type_late(),
+                Op::AsType { type_name } => self.op_as_type(method, type_name),
+                Op::AsTypeLate => self.op_as_type_late(),
                 Op::InstanceOf => self.op_instance_of(),
                 Op::Label => Ok(FrameControl::Continue),
                 Op::Debug {
@@ -692,6 +743,20 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
                     reader,
                     full_data,
                 ),
+                Op::Coerce { index } => self.op_coerce(method, index),
+                Op::Si8 => self.op_si8(),
+                Op::Si16 => self.op_si16(),
+                Op::Si32 => self.op_si32(),
+                Op::Sf32 => self.op_sf32(),
+                Op::Sf64 => self.op_sf64(),
+                Op::Li8 => self.op_li8(),
+                Op::Li16 => self.op_li16(),
+                Op::Li32 => self.op_li32(),
+                Op::Lf32 => self.op_lf32(),
+                Op::Lf64 => self.op_lf64(),
+                Op::Sxi1 => self.op_sxi1(),
+                Op::Sxi8 => self.op_sxi8(),
+                Op::Sxi16 => self.op_sxi16(),
                 _ => self.unknown_op(op),
             };
 
@@ -1253,7 +1318,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
         self.context.avm2.push(
             scope
-                .map(|s| s.read().locals().clone().into())
+                .map(|s| (*s.read().locals()).into())
                 .unwrap_or(Value::Undefined),
         );
 
@@ -1330,7 +1395,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
 
     fn op_get_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error> {
         let object = self.context.avm2.pop().coerce_to_object(self)?;
-        let value = object.get_slot(index)?;
+        let value = object.get_slot(self, index)?;
 
         self.context.avm2.push(value);
 
@@ -1338,16 +1403,16 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_set_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error> {
-        let object = self.context.avm2.pop().coerce_to_object(self)?;
         let value = self.context.avm2.pop();
+        let object = self.context.avm2.pop().coerce_to_object(self)?;
 
-        object.set_slot(index, value, self.context.gc_context)?;
+        object.set_slot(self, index, value)?;
 
         Ok(FrameControl::Continue)
     }
 
     fn op_get_global_slot(&mut self, index: u32) -> Result<FrameControl<'gc>, Error> {
-        let value = self.scope.unwrap().read().globals().get_slot(index)?;
+        let value = self.scope.unwrap().read().globals().get_slot(self, index)?;
 
         self.context.avm2.push(value);
 
@@ -1361,7 +1426,7 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             .unwrap()
             .read()
             .globals()
-            .set_slot(index, value, self.context.gc_context)?;
+            .set_slot(self, index, value)?;
 
         Ok(FrameControl::Continue)
     }
@@ -1421,9 +1486,16 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     }
 
     fn op_new_activation(&mut self) -> Result<FrameControl<'gc>, Error> {
-        self.context
-            .avm2
-            .push(ScriptObject::bare_object(self.context.gc_context));
+        if let Some(activation_proto) = self.activation_proto {
+            self.context.avm2.push(ScriptObject::object(
+                self.context.gc_context,
+                activation_proto,
+            ));
+        } else {
+            self.context
+                .avm2
+                .push(ScriptObject::bare_object(self.context.gc_context));
+        }
 
         Ok(FrameControl::Continue)
     }
@@ -2247,24 +2319,26 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
     ) -> Result<FrameControl<'gc>, Error> {
         let value = self.context.avm2.pop().coerce_to_object(self)?;
 
-        let type_name =
+        let multiname =
             self.pool_multiname_static(method, type_name_index, self.context.gc_context)?;
-        let type_object = if let Some(scope) = self.scope() {
-            scope.read().find(&type_name, self)?
+        let found: Result<Value<'gc>, Error> = if let Some(scope) = self.scope() {
+            scope
+                .write(self.context.gc_context)
+                .resolve(&multiname, self)?
         } else {
             None
-        };
-
-        if let Some(type_object) = type_object {
-            let is_instance_of = value.is_instance_of(self, type_object, true)?;
-            self.context.avm2.push(is_instance_of);
-        } else {
-            return Err(format!(
-                "Attempted to check against nonexistent type {:?}",
-                type_name
-            )
-            .into());
         }
+        .ok_or_else(|| {
+            format!(
+                "Attempted to check against nonexistent type {:?}",
+                multiname
+            )
+            .into()
+        });
+        let type_object = found?.coerce_to_object(self)?;
+
+        let is_instance_of = value.is_instance_of(self, type_object, true)?;
+        self.context.avm2.push(is_instance_of);
 
         Ok(FrameControl::Continue)
     }
@@ -2280,13 +2354,76 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         Ok(FrameControl::Continue)
     }
 
-    fn op_instance_of(&mut self) -> Result<FrameControl<'gc>, Error> {
-        let type_object = self.context.avm2.pop().coerce_to_object(self)?;
+    fn op_as_type(
+        &mut self,
+        method: Gc<'gc, BytecodeMethod<'gc>>,
+        type_name_index: Index<AbcMultiname>,
+    ) -> Result<FrameControl<'gc>, Error> {
         let value = self.context.avm2.pop().coerce_to_object(self)?;
 
-        let is_instance_of = value.is_instance_of(self, type_object, false)?;
+        let multiname =
+            self.pool_multiname_static(method, type_name_index, self.context.gc_context)?;
+        let found: Result<Value<'gc>, Error> = if let Some(scope) = self.scope() {
+            scope
+                .write(self.context.gc_context)
+                .resolve(&multiname, self)?
+        } else {
+            None
+        }
+        .ok_or_else(|| {
+            format!(
+                "Attempted to check against nonexistent type {:?}",
+                multiname
+            )
+            .into()
+        });
+        let class = found?.coerce_to_object(self)?;
 
-        self.context.avm2.push(is_instance_of);
+        if class.as_class().is_none() {
+            return Err("TypeError: The right-hand side of operator must be a class.".into());
+        }
+
+        let is_instance_of = value.is_instance_of(self, class, true)?;
+
+        if is_instance_of {
+            self.context.avm2.push(value);
+        } else {
+            self.context.avm2.push(Value::Null);
+        }
+
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_as_type_late(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let class = self.context.avm2.pop().coerce_to_object(self)?;
+        let value = self.context.avm2.pop().coerce_to_object(self)?;
+
+        if class.as_class().is_none() {
+            return Err("TypeError: The right-hand side of operator must be a class.".into());
+        }
+
+        let is_instance_of = value.is_instance_of(self, class, true)?;
+
+        if is_instance_of {
+            self.context.avm2.push(value);
+        } else {
+            self.context.avm2.push(Value::Null);
+        }
+
+        Ok(FrameControl::Continue)
+    }
+
+    fn op_instance_of(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let type_object = self.context.avm2.pop().coerce_to_object(self)?;
+        let value = self.context.avm2.pop().coerce_to_object(self).ok();
+
+        if let Some(value) = value {
+            let is_instance_of = value.is_instance_of(self, type_object, false)?;
+
+            self.context.avm2.push(is_instance_of);
+        } else {
+            self.context.avm2.push(false);
+        }
 
         Ok(FrameControl::Continue)
     }
@@ -2400,11 +2537,238 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
             - reader.pos(full_data) as i32;
 
         reader.seek(full_data, offset);
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Coerce`
+    fn op_coerce(
+        &mut self,
+        _method: Gc<'gc, BytecodeMethod<'gc>>,
+        _index: Index<AbcMultiname>,
+    ) -> Result<FrameControl<'gc>, Error> {
+        let val = self.context.avm2.pop();
+
+        let x = match val {
+            Value::Null | Value::Undefined => Value::Null,
+            Value::Number(_)
+            | Value::String(_)
+            | Value::Unsigned(_)
+            | Value::Integer(_)
+            | Value::Bool(_) => Value::Object(val.coerce_to_object(self)?),
+            Value::Object(_) => val,
+        };
+
+        self.context.avm2.push(x);
+        Ok(FrameControl::Continue)
+    }
+
+    fn domain_memory(&self) -> Result<ByteArrayObject<'gc>, Error> {
+        self.scope()
+            .map(|s| s.read().globals())
+            .and_then(|g| g.as_application_domain())
+            .map(|d| d.domain_memory())
+            .ok_or_else(|| "No domain memory assigned".into())
+    }
+
+    /// Implements `Op::Si8`
+    fn op_si8(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let address = self.context.avm2.pop().coerce_to_i32(self)?;
+        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+
+        let dm = self.domain_memory()?;
+        let mut dm = dm
+            .as_bytearray_mut(self.context.gc_context)
+            .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+
+        let address =
+            usize::try_from(address).map_err(|_| "RangeError: The specified range is invalid")?;
+        dm.write_at_nongrowing(&val.to_le_bytes(), address)?;
 
         Ok(FrameControl::Continue)
     }
 
-    #[allow(unused_variables)]
+    /// Implements `Op::Si16`
+    fn op_si16(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let address = self.context.avm2.pop().coerce_to_i32(self)?;
+        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+
+        let dm = self.domain_memory()?;
+        let mut dm = dm
+            .as_bytearray_mut(self.context.gc_context)
+            .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+
+        let address =
+            usize::try_from(address).map_err(|_| "RangeError: The specified range is invalid")?;
+        dm.write_at_nongrowing(&val.to_le_bytes(), address)?;
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Si32`
+    fn op_si32(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let address = self.context.avm2.pop().coerce_to_i32(self)?;
+        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+
+        let dm = self.domain_memory()?;
+        let mut dm = dm
+            .as_bytearray_mut(self.context.gc_context)
+            .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+
+        let address =
+            usize::try_from(address).map_err(|_| "RangeError: The specified range is invalid")?;
+        dm.write_at_nongrowing(&val.to_le_bytes(), address)?;
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Sf32`
+    fn op_sf32(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let address = self.context.avm2.pop().coerce_to_i32(self)?;
+        let val = self.context.avm2.pop().coerce_to_number(self)? as f32;
+
+        let dm = self.domain_memory()?;
+        let mut dm = dm
+            .as_bytearray_mut(self.context.gc_context)
+            .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+
+        let address =
+            usize::try_from(address).map_err(|_| "RangeError: The specified range is invalid")?;
+        dm.write_at_nongrowing(&val.to_le_bytes(), address)?;
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Sf64`
+    fn op_sf64(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let address = self.context.avm2.pop().coerce_to_i32(self)?;
+        let val = self.context.avm2.pop().coerce_to_number(self)?;
+
+        let dm = self.domain_memory()?;
+        let mut dm = dm
+            .as_bytearray_mut(self.context.gc_context)
+            .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+
+        let address =
+            usize::try_from(address).map_err(|_| "RangeError: The specified range is invalid")?;
+        dm.write_at_nongrowing(&val.to_le_bytes(), address)?;
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Li8`
+    fn op_li8(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
+
+        let dm = self.domain_memory()?;
+        let dm = dm
+            .as_bytearray()
+            .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+        let val = dm.get(address);
+
+        if let Some(val) = val {
+            self.context.avm2.push(val);
+        } else {
+            return Err("RangeError: The specified range is invalid".into());
+        }
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Li16`
+    fn op_li16(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
+
+        let dm = self.domain_memory()?;
+        let dm = dm
+            .as_bytearray()
+            .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+        let val = dm.read_at(2, address)?;
+        self.context
+            .avm2
+            .push(u16::from_le_bytes(val.try_into().unwrap()));
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Li32`
+    fn op_li32(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
+
+        let dm = self.domain_memory()?;
+        let dm = dm
+            .as_bytearray()
+            .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+        let val = dm.read_at(4, address)?;
+        self.context
+            .avm2
+            .push(i32::from_le_bytes(val.try_into().unwrap()));
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Lf32`
+    fn op_lf32(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
+
+        let dm = self.domain_memory()?;
+        let dm = dm
+            .as_bytearray()
+            .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+        let val = dm.read_at(4, address)?;
+        self.context
+            .avm2
+            .push(f32::from_le_bytes(val.try_into().unwrap()));
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Lf64`
+    fn op_lf64(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let address = self.context.avm2.pop().coerce_to_u32(self)? as usize;
+
+        let dm = self.domain_memory()?;
+        let dm = dm
+            .as_bytearray()
+            .ok_or_else(|| "Unable to get bytearray storage".to_string())?;
+        let val = dm.read_at(8, address)?;
+        self.context
+            .avm2
+            .push(f64::from_le_bytes(val.try_into().unwrap()));
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Sxi1`
+    fn op_sxi1(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+
+        let val = val.wrapping_shl(31).wrapping_shr(31);
+
+        self.context.avm2.push(Value::Integer(val));
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Sxi8`
+    fn op_sxi8(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+
+        let val = (val.wrapping_shl(23).wrapping_shr(23) & 0xFF) as i8 as i32;
+
+        self.context.avm2.push(Value::Integer(val));
+
+        Ok(FrameControl::Continue)
+    }
+
+    /// Implements `Op::Sxi16`
+    fn op_sxi16(&mut self) -> Result<FrameControl<'gc>, Error> {
+        let val = self.context.avm2.pop().coerce_to_i32(self)?;
+
+        let val = (val.wrapping_shl(15).wrapping_shr(15) & 0xFFFF) as i16 as i32;
+
+        self.context.avm2.push(Value::Integer(val));
+
+        Ok(FrameControl::Continue)
+    }
+
     #[cfg(avm_debug)]
     fn op_debug(
         &mut self,
@@ -2425,19 +2789,17 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         Ok(FrameControl::Continue)
     }
 
-    #[allow(unused_variables)]
     #[cfg(not(avm_debug))]
     fn op_debug(
         &mut self,
-        method: Gc<'gc, BytecodeMethod<'gc>>,
-        is_local_register: bool,
-        register_name: Index<String>,
-        register: u8,
+        _method: Gc<'gc, BytecodeMethod<'gc>>,
+        _is_local_register: bool,
+        _register_name: Index<String>,
+        _register: u8,
     ) -> Result<FrameControl<'gc>, Error> {
         Ok(FrameControl::Continue)
     }
 
-    #[allow(unused_variables)]
     #[cfg(avm_debug)]
     fn op_debug_file(
         &mut self,
@@ -2451,17 +2813,15 @@ impl<'a, 'gc, 'gc_context> Activation<'a, 'gc, 'gc_context> {
         Ok(FrameControl::Continue)
     }
 
-    #[allow(unused_variables)]
     #[cfg(not(avm_debug))]
     fn op_debug_file(
         &mut self,
-        method: Gc<'gc, BytecodeMethod<'gc>>,
-        file_name: Index<String>,
+        _method: Gc<'gc, BytecodeMethod<'gc>>,
+        _file_name: Index<String>,
     ) -> Result<FrameControl<'gc>, Error> {
         Ok(FrameControl::Continue)
     }
 
-    #[allow(unused_variables)]
     fn op_debug_line(&mut self, line_num: u32) -> Result<FrameControl<'gc>, Error> {
         avm_debug!(self.avm2(), "Line: {}", line_num);
 

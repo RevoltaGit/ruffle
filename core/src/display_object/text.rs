@@ -36,7 +36,7 @@ impl<'gc> Text<'gc> {
                         swf,
                         id: tag.id,
                         bounds: tag.bounds.clone().into(),
-                        text_transform: tag.matrix,
+                        text_transform: tag.matrix.into(),
                         text_blocks: tag.records.clone(),
                     },
                 ),
@@ -65,6 +65,18 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
         Some(self.0.read().static_data.swf.clone())
     }
 
+    fn replace_with(&self, context: &mut UpdateContext<'_, 'gc, '_>, id: CharacterId) {
+        if let Some(new_text) = context
+            .library
+            .library_for_movie_mut(self.movie().unwrap())
+            .get_text(id)
+        {
+            self.0.write(context.gc_context).static_data = new_text.0.read().static_data;
+        } else {
+            log::warn!("PlaceObject: expected text at character ID {}", id);
+        }
+    }
+
     fn run_frame(&self, _context: &mut UpdateContext) {
         // Noop
     }
@@ -83,7 +95,7 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
             a: 0,
         };
         let mut font_id = 0;
-        let mut height = Twips::zero();
+        let mut height = Twips::ZERO;
         let mut transform: Transform = Default::default();
         for block in &tf.static_data.text_blocks {
             if let Some(x) = block.x_offset {
@@ -104,10 +116,7 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
                 let scale = (height.get() as f32) / font.scale();
                 transform.matrix.a = scale;
                 transform.matrix.d = scale;
-                transform.color_transform.r_mult = f32::from(color.r) / 255.0;
-                transform.color_transform.g_mult = f32::from(color.g) / 255.0;
-                transform.color_transform.b_mult = f32::from(color.b) / 255.0;
-                transform.color_transform.a_mult = f32::from(color.a) / 255.0;
+                transform.color_transform.set_mult_color(&color);
                 for c in &block.glyphs {
                     if let Some(glyph) = font.get_glyph(c.index as usize) {
                         context.transform_stack.push(&transform);
@@ -147,7 +156,7 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
             point = text_matrix * local_matrix * point;
 
             let mut font_id = 0;
-            let mut height = Twips::zero();
+            let mut height = Twips::ZERO;
             let mut glyph_matrix = Matrix::default();
             for block in &tf.static_data.text_blocks {
                 if let Some(x) = block.x_offset {
@@ -174,7 +183,7 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
                             let mut matrix = glyph_matrix;
                             matrix.invert();
                             let point = matrix * point;
-                            let glyph_bounds = BoundingBox::from(&glyph.shape.shape_bounds);
+                            let glyph_bounds: BoundingBox = (&glyph.shape.shape_bounds).into();
                             if glyph_bounds.contains(point)
                                 && crate::shape_utils::shape_hit_test(
                                     &glyph.shape,

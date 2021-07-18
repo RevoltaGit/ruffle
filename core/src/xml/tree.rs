@@ -256,7 +256,7 @@ impl<'gc> XmlNode<'gc> {
                 Event::End(_) => {
                     open_tags.pop();
                 }
-                Event::Text(bt) => {
+                Event::Text(bt) | Event::CData(bt) => {
                     let child = XmlNode::text_from_text_event(mc, bt, document, process_entity)?;
                     if child.node_value().as_deref() != Some("")
                         && (!ignore_white || !child.is_whitespace_text())
@@ -1151,7 +1151,7 @@ impl<'gc> XmlNode<'gc> {
     /// that yield `true` shall be printed.
     pub fn into_string<F>(self, filter: &mut F) -> Result<String, Error>
     where
-        F: FnMut(XmlNode<'gc>) -> bool,
+        F: FnMut(&XmlNode<'gc>) -> bool,
     {
         let mut buf = Vec::new();
         let mut writer = Writer::new(Cursor::new(&mut buf));
@@ -1173,9 +1173,9 @@ impl<'gc> XmlNode<'gc> {
     ) -> Result<(), Error>
     where
         W: Write,
-        F: FnMut(XmlNode<'gc>) -> bool,
+        F: FnMut(&XmlNode<'gc>) -> bool,
     {
-        let children: Vec<_> = self.children().filter(|child| filter(*child)).collect();
+        let children: Vec<_> = self.children().filter(|child| filter(child)).collect();
         let children_len = children.len();
 
         match &*self.0.read() {

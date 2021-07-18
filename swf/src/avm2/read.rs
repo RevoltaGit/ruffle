@@ -1,3 +1,5 @@
+#![allow(clippy::unusual_byte_groupings)]
+
 use crate::avm2::types::*;
 use crate::error::{Error, Result};
 use crate::extensions::ReadSwfExt;
@@ -15,7 +17,7 @@ impl<'a> ReadSwfExt<'a> for Reader<'a> {
 
     #[inline(always)]
     fn as_slice(&self) -> &'a [u8] {
-        &self.input
+        self.input
     }
 }
 
@@ -88,22 +90,20 @@ impl<'a> Reader<'a> {
     }
 
     fn read_i24(&mut self) -> Result<i32> {
-        Ok(i32::from(self.read_u8()? as i8)
-            | (i32::from(self.read_u8()? as i8) << 8)
+        Ok(i32::from(self.read_u8()?)
+            | (i32::from(self.read_u8()?) << 8)
             | (i32::from(self.read_u8()? as i8) << 16))
     }
 
     fn read_i32(&mut self) -> Result<i32> {
-        self.read_encoded_i32()
+        Ok(self.read_encoded_u32()? as i32)
     }
 
     fn read_string(&mut self) -> Result<String> {
-        let len = self.read_u30()? as usize;
-        let mut s = String::with_capacity(len);
-        self.input
-            .by_ref()
-            .take(len as u64)
-            .read_to_string(&mut s)?;
+        let len = self.read_u30()?;
+        // TODO: Avoid allocating a String.
+        let mut s = String::with_capacity(len as usize);
+        self.read_slice(len as usize)?.read_to_string(&mut s)?;
         Ok(s)
     }
 
@@ -472,11 +472,8 @@ impl<'a> Reader<'a> {
 
         // Read the code data.
         let code_len = self.read_u30()?;
-        let mut code = Vec::with_capacity(code_len as usize);
-        self.input
-            .by_ref()
-            .take(code_len.into())
-            .read_to_end(&mut code)?;
+        // TODO: Avoid allocating a Vec.
+        let code = self.read_slice(code_len as usize)?.to_vec();
 
         let num_exceptions = self.read_u30()? as usize;
         let mut exceptions = Vec::with_capacity(num_exceptions);
@@ -726,6 +723,11 @@ impl<'a> Reader<'a> {
             OpCode::Label => Op::Label,
             OpCode::LessEquals => Op::LessEquals,
             OpCode::LessThan => Op::LessThan,
+            OpCode::Lf32 => Op::Lf32,
+            OpCode::Lf64 => Op::Lf64,
+            OpCode::Li16 => Op::Li16,
+            OpCode::Li32 => Op::Li32,
+            OpCode::Li8 => Op::Li8,
             OpCode::LookupSwitch => Op::LookupSwitch {
                 default_offset: self.read_i24()?,
                 case_offsets: {
@@ -815,10 +817,18 @@ impl<'a> Reader<'a> {
             OpCode::SetSuper => Op::SetSuper {
                 index: self.read_index()?,
             },
+            OpCode::Sf32 => Op::Sf32,
+            OpCode::Sf64 => Op::Sf64,
+            OpCode::Si16 => Op::Si16,
+            OpCode::Si32 => Op::Si32,
+            OpCode::Si8 => Op::Si8,
             OpCode::StrictEquals => Op::StrictEquals,
             OpCode::Subtract => Op::Subtract,
             OpCode::SubtractI => Op::SubtractI,
             OpCode::Swap => Op::Swap,
+            OpCode::Sxi1 => Op::Sxi1,
+            OpCode::Sxi16 => Op::Sxi16,
+            OpCode::Sxi8 => Op::Sxi8,
             OpCode::Throw => Op::Throw,
             OpCode::TypeOf => Op::TypeOf,
             OpCode::URShift => Op::URShift,
@@ -904,29 +914,39 @@ pub mod tests {
     }
 
     #[test]
+    fn read_i24() {
+        let read = |data: &[u8]| Reader::new(data).read_i24().unwrap();
+        assert_eq!(read(&[0, 0, 0]), 0);
+        assert_eq!(read(&[2, 0, 0]), 2);
+        assert_eq!(read(&[0b1101_0001, 0b0010_1111, 0b0000_0001]), 77777);
+        assert_eq!(read(&[0b0010_1111, 0b1101_0000, 0b1111_1110]), -77777);
+    }
+
+    #[test]
     fn read_i32() {
         let read = |data: &[u8]| Reader::new(data).read_i32().unwrap();
         assert_eq!(read(&[0]), 0);
         assert_eq!(read(&[2]), 2);
         assert_eq!(read(&[0b1_0000001, 0b0_0000001]), 129);
         assert_eq!(
-            read(&[0b1_0000001, 0b1_0000001, 0b0_1100111]),
-            0b1111_1111111_1100111_0000001_0000001_u32 as i32
-        );
-        assert_eq!(
-            read(&[0b1_0000001, 0b1_0000001, 0b1_0000001, 0b0_1100111]),
-            0b1111_1100111_0000001_0000001_0000001_u32 as i32
-        );
-        // TODO: verify this matches Flash
-        assert_eq!(
             read(&[
                 0b1_0000001,
                 0b1_0000001,
                 0b1_0000001,
                 0b1_0000001,
-                0b1_1000001
+                0b0000_0100
             ]),
-            0b0001_0000001_0000001_0000001_0000001_u32 as i32
+            1075855489
+        );
+
+        // Note that the value is NOT sign-extended, unlike what the AVM2 spec suggests.
+        // Negatives must take up the full 5 bytes.
+        assert_eq!(read(&[0b0_1000000]), 64);
+        assert_eq!(read(&[0b1_0000000, 0b0_1000000]), 8192);
+        assert_eq!(read(&[0b1_0000000, 0b1_0000000, 0b0_1000000]), 1048576);
+        assert_eq!(
+            read(&[0b1_0000000, 0b1_0000000, 0b1_0000000, 0b0_1000000]),
+            134217728
         );
         assert_eq!(
             read(&[
@@ -934,9 +954,60 @@ pub mod tests {
                 0b1_0000000,
                 0b1_0000000,
                 0b1_0000000,
+                0b0000_0100
+            ]),
+            1073741824
+        );
+        assert_eq!(
+            read(&[
+                0b1_1111111,
+                0b1_1111111,
+                0b1_1111111,
+                0b1_1111111,
+                0b0000_0111
+            ]),
+            2147483647
+        );
+
+        assert_eq!(
+            read(&[
+                0b1_1000000,
+                0b1_1111111,
+                0b1_1111111,
+                0b1_1111111,
+                0b0000_1111,
+            ]),
+            -64
+        );
+        assert_eq!(
+            read(&[
+                0b1_0000000,
+                0b1_1000000,
+                0b1_1111111,
+                0b1_1111111,
                 0b0000_1111
             ]),
-            0b1111_0000000_0000000_0000000_0000000_u32 as i32
+            -8192
+        );
+        assert_eq!(
+            read(&[
+                0b1_0000000,
+                0b1_0000000,
+                0b1_1000000,
+                0b1_1111111,
+                0b0000_1111
+            ]),
+            -1048576
+        );
+        assert_eq!(
+            read(&[
+                0b1_0000000,
+                0b1_0000000,
+                0b1_0000000,
+                0b1_1000000,
+                0b0000_1111
+            ]),
+            -134217728
         );
         assert_eq!(
             read(&[
@@ -944,9 +1015,28 @@ pub mod tests {
                 0b1_0000000,
                 0b1_0000000,
                 0b1_0000000,
-                0b1111_1111
+                0b0000_1000
             ]),
-            0b1111_0000000_0000000_0000000_0000000_u32 as i32
+            -2147483648
+        );
+
+        assert_eq!(read(&[0b1_0000100, 0b1_0000111, 0b0_0000100,]), 66436);
+
+        assert_eq!(
+            read(&[0b1_0000100, 0b1_0000111, 0b1_0000000, 0b0_1111111,]),
+            266339204
+        );
+
+        // Final 4 bytes of a 5-byte value are unimportant.
+        assert_eq!(
+            read(&[
+                0b1_0000100,
+                0b1_0000100,
+                0b1_0000100,
+                0b1_0000100,
+                0b1111_0111
+            ]),
+            1887502852
         );
     }
 }

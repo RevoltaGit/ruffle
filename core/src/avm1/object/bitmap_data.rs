@@ -1,13 +1,12 @@
 use crate::add_field_accessors;
-use crate::avm1::error::Error;
-use crate::avm1::{Object, ScriptObject, TObject, Value};
-use crate::impl_custom_object_without_set;
+use crate::avm1::{Object, ScriptObject, TObject};
+use crate::impl_custom_object;
 use gc_arena::{Collect, GcCell, MutationContext};
 
-use crate::avm1::activation::Activation;
 use crate::avm1::object::color_transform_object::ColorTransformObject;
 use crate::backend::render::{BitmapHandle, RenderBackend};
 use crate::bitmap::turbulence::Turbulence;
+use bitflags::bitflags;
 use downcast_rs::__std::fmt::Formatter;
 use std::fmt;
 use std::ops::Range;
@@ -56,7 +55,7 @@ impl Color {
         ((self.0 >> 24) & 0xFF) as u8
     }
 
-    pub fn to_premultiplied_alpha(&self, transparency: bool) -> Color {
+    pub fn to_premultiplied_alpha(self, transparency: bool) -> Self {
         // This has some accuracy issues with some alpha values
 
         let old_alpha = if transparency { self.alpha() } else { 255 };
@@ -67,25 +66,25 @@ impl Color {
         let g = (self.green() as f64 * a).round() as u8;
         let b = (self.blue() as f64 * a).round() as u8;
 
-        Color::argb(old_alpha, r, g, b)
+        Self::argb(old_alpha, r, g, b)
     }
 
-    pub fn to_un_multiplied_alpha(&self) -> Color {
+    pub fn to_un_multiplied_alpha(self) -> Self {
         let a = self.alpha() as f64 / 255.0;
 
         let r = (self.red() as f64 / a).round() as u8;
         let g = (self.green() as f64 / a).round() as u8;
         let b = (self.blue() as f64 / a).round() as u8;
 
-        Color::argb(self.alpha(), r, g, b)
+        Self::argb(self.alpha(), r, g, b)
     }
 
-    pub fn argb(alpha: u8, red: u8, green: u8, blue: u8) -> Color {
-        Color(((alpha as i32) << 24) | (red as i32) << 16 | (green as i32) << 8 | (blue as i32))
+    pub fn argb(alpha: u8, red: u8, green: u8, blue: u8) -> Self {
+        Self(i32::from_le_bytes([blue, green, red, alpha]))
     }
 
-    pub fn with_alpha(&self, alpha: u8) -> Color {
-        Color::argb(alpha, self.red(), self.green(), self.blue())
+    pub fn with_alpha(&self, alpha: u8) -> Self {
+        Self::argb(alpha, self.red(), self.green(), self.blue())
     }
 
     pub fn blend_over(&self, source: &Self) -> Self {
@@ -95,7 +94,7 @@ impl Color {
         let g = source.green() + ((self.green() as u16 * (255 - sa as u16)) >> 8) as u8;
         let b = source.blue() + ((self.blue() as u16 * (255 - sa as u16)) >> 8) as u8;
         let a = source.alpha() + ((self.alpha() as u16 * (255 - sa as u16)) >> 8) as u8;
-        Color::argb(a, r, g, b)
+        Self::argb(a, r, g, b)
     }
 }
 
@@ -123,30 +122,13 @@ impl From<i32> for Color {
     }
 }
 
-pub struct ChannelOptions(pub u32);
-
-impl ChannelOptions {
-    pub fn alpha(&self) -> bool {
-        self.0 & 8 == 8
-    }
-    pub fn red(&self) -> bool {
-        self.0 & 1 == 1
-    }
-    pub fn green(&self) -> bool {
-        self.0 & 2 == 2
-    }
-    pub fn blue(&self) -> bool {
-        self.0 & 4 == 4
-    }
-
-    pub fn rgb() -> Self {
-        (1 | 2 | 4).into()
-    }
-}
-
-impl From<u32> for ChannelOptions {
-    fn from(v: u32) -> Self {
-        Self { 0: v }
+bitflags! {
+    pub struct ChannelOptions: u8 {
+        const RED = 1 << 0;
+        const GREEN = 1 << 1;
+        const BLUE = 1 << 2;
+        const ALPHA = 1 << 3;
+        const RGB = Self::RED.bits | Self::GREEN.bits | Self::BLUE.bits;
     }
 }
 
@@ -164,13 +146,13 @@ pub struct BitmapData {
 }
 
 impl BitmapData {
-    pub fn init_pixels(&mut self, width: u32, height: u32, fill_color: i32, transparency: bool) {
+    pub fn init_pixels(&mut self, width: u32, height: u32, transparency: bool, fill_color: i32) {
         self.width = width;
         self.height = height;
         self.transparency = transparency;
         self.pixels = vec![
             Color(fill_color).to_premultiplied_alpha(self.transparency());
-            (width * height) as usize
+            width as usize * height as usize
         ];
         self.dirty = true;
     }
@@ -215,8 +197,12 @@ impl BitmapData {
         &self.pixels
     }
 
-    pub fn set_pixels(&mut self, pixels: Vec<Color>) {
+    pub fn set_pixels(&mut self, width: u32, height: u32, transparency: bool, pixels: Vec<Color>) {
+        self.width = width;
+        self.height = height;
+        self.transparency = transparency;
         self.pixels = pixels;
+        self.dirty = true;
     }
 
     pub fn pixels_rgba(&self) -> Vec<u8> {
@@ -339,7 +325,7 @@ impl BitmapData {
             for x in 0..self.width() {
                 let pixel_color = if gray_scale {
                     let gray = rng.gen_range(low..high);
-                    let alpha = if channel_options.alpha() {
+                    let alpha = if channel_options.contains(ChannelOptions::ALPHA) {
                         rng.gen_range(low..high)
                     } else {
                         255
@@ -347,25 +333,25 @@ impl BitmapData {
 
                     Color::argb(alpha, gray, gray, gray)
                 } else {
-                    let r = if channel_options.red() {
+                    let r = if channel_options.contains(ChannelOptions::RED) {
                         rng.gen_range(low..high)
                     } else {
                         0
                     };
 
-                    let g = if channel_options.green() {
+                    let g = if channel_options.contains(ChannelOptions::GREEN) {
                         rng.gen_range(low..high)
                     } else {
                         0
                     };
 
-                    let b = if channel_options.blue() {
+                    let b = if channel_options.contains(ChannelOptions::BLUE) {
                         rng.gen_range(low..high)
                     } else {
                         0
                     };
 
-                    let a = if channel_options.alpha() {
+                    let a = if channel_options.contains(ChannelOptions::ALPHA) {
                         rng.gen_range(low..high)
                     } else {
                         255
@@ -403,28 +389,28 @@ impl BitmapData {
                         .into();
 
                     let channel_shift: u32 = match source_channel {
-                        // Alpha
-                        8 => 24,
                         // red
                         1 => 16,
                         // green
                         2 => 8,
                         // blue
                         4 => 0,
+                        // alpha
+                        8 => 24,
                         _ => 0,
                     };
 
                     let source_part = (source_color >> channel_shift) & 0xFF;
 
                     let result_color: u32 = match dest_channel {
-                        // Alpha
-                        8 => (original_color & 0x00FFFFFF) | source_part << 24,
                         // red
                         1 => (original_color & 0xFF00FFFF) | source_part << 16,
                         // green
                         2 => (original_color & 0xFFFF00FF) | source_part << 8,
                         // blue
                         4 => (original_color & 0xFFFFFF00) | source_part,
+                        // alpha
+                        8 => (original_color & 0x00FFFFFF) | source_part << 24,
                         _ => original_color,
                     };
 
@@ -598,6 +584,66 @@ impl BitmapData {
         }
     }
 
+    pub fn merge(
+        &mut self,
+        source_bitmap: &Self,
+        src_rect: (i32, i32, i32, i32),
+        dest_point: (i32, i32),
+        rgba_mult: (i32, i32, i32, i32),
+    ) {
+        let (src_min_x, src_min_y, src_width, src_height) = src_rect;
+        let (dest_min_x, dest_min_y) = dest_point;
+
+        for src_y in src_min_y..(src_min_y + src_height) {
+            for src_x in src_min_x..(src_min_x + src_width) {
+                let dest_x = src_x - src_min_x + dest_min_x;
+                let dest_y = src_y - src_min_y + dest_min_y;
+
+                if !self.is_point_in_bounds(dest_x, dest_y)
+                    || !source_bitmap.is_point_in_bounds(src_x, src_y)
+                {
+                    continue;
+                }
+
+                let source_color = source_bitmap
+                    .get_pixel_raw(src_x as u32, src_y as u32)
+                    .unwrap()
+                    .to_un_multiplied_alpha();
+
+                let dest_color = self
+                    .get_pixel_raw(dest_x as u32, dest_y as u32)
+                    .unwrap()
+                    .to_un_multiplied_alpha();
+
+                let red_mult = rgba_mult.0.clamp(0, 256) as u16;
+                let green_mult = rgba_mult.1.clamp(0, 256) as u16;
+                let blue_mult = rgba_mult.2.clamp(0, 256) as u16;
+                let alpha_mult = rgba_mult.3.clamp(0, 256) as u16;
+
+                let red = (source_color.red() as u16 * red_mult
+                    + dest_color.red() as u16 * (256 - red_mult))
+                    / 256;
+                let green = (source_color.green() as u16 * green_mult
+                    + dest_color.green() as u16 * (256 - green_mult))
+                    / 256;
+                let blue = (source_color.blue() as u16 * blue_mult
+                    + dest_color.blue() as u16 * (256 - blue_mult))
+                    / 256;
+                let alpha = (source_color.alpha() as u16 * alpha_mult
+                    + dest_color.alpha() as u16 * (256 - alpha_mult))
+                    / 256;
+
+                let mix_color = Color::argb(alpha as u8, red as u8, green as u8, blue as u8);
+
+                self.set_pixel32_raw(
+                    dest_x as u32,
+                    dest_y as u32,
+                    mix_color.to_premultiplied_alpha(self.transparency),
+                );
+            }
+        }
+    }
+
     // Unlike `copy_channel` and `copy_pixels`, this function seems to
     // operate "in-place" if the source bitmap is the same object as `self`.
     // This means that we can't resolve this aliasing issue in Rust by a
@@ -653,7 +699,7 @@ impl BitmapData {
         random_seed: i64,
         stitch: bool,
         fractal_noise: bool,
-        channel_options: u8,
+        channel_options: ChannelOptions,
         grayscale: bool,
         offsets: Vec<(f64, f64)>, // must contain `num_octaves` values
     ) {
@@ -664,7 +710,7 @@ impl BitmapData {
                 let px = x as f64;
                 let py = y as f64;
 
-                let mut noise = [0.0_f64; 4];
+                let mut noise = [0.0; 4];
 
                 // grayscale mode is different enough to warrant its own branch
                 if grayscale {
@@ -683,7 +729,7 @@ impl BitmapData {
                     noise[1] = noise[0];
                     noise[2] = noise[0];
 
-                    noise[3] = if channel_options & 8 != 0 {
+                    noise[3] = if channel_options.contains(ChannelOptions::ALPHA) {
                         turb.turbulence(
                             1,
                             (px, py),
@@ -710,7 +756,9 @@ impl BitmapData {
                         // because of the saturating conversion to u8
                         *noise_c = if c == 3 { 1.0 } else { -1.0 };
 
-                        if (channel_options & (1 << c)) != 0 {
+                        // SAFETY: `c` is always in 0..4, so `1 << c` is a valid `ChannelOptions`.
+                        let c = unsafe { ChannelOptions::from_bits_unchecked(1 << c) };
+                        if channel_options.contains(c) {
                             *noise_c = turb.turbulence(
                                 channel,
                                 (px, py),
@@ -839,33 +887,8 @@ impl<'gc> BitmapDataObject<'gc> {
 }
 
 impl<'gc> TObject<'gc> for BitmapDataObject<'gc> {
-    impl_custom_object_without_set!(base);
-
-    fn set(
-        &self,
-        name: &str,
-        value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<(), Error<'gc>> {
-        let base = self.0.read().base;
-        base.internal_set(
-            name,
-            value,
-            activation,
-            (*self).into(),
-            Some(activation.context.avm1.prototypes.bitmap_data),
-        )
-    }
-
-    fn as_bitmap_data_object(&self) -> Option<BitmapDataObject<'gc>> {
-        Some(*self)
-    }
-
-    fn create_bare_object(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        this: Object<'gc>,
-    ) -> Result<Object<'gc>, Error<'gc>> {
-        Ok(BitmapDataObject::empty_object(activation.context.gc_context, Some(this)).into())
-    }
+    impl_custom_object!(base {
+        set(proto: bitmap_data);
+        bare_object(as_bitmap_data_object -> BitmapDataObject::empty_object);
+    });
 }

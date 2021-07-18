@@ -24,7 +24,10 @@ async function sign(
     }
 
     if (result.downloadedFiles.length === 1) {
-        fs.renameSync(result.downloadedFiles[0], destination);
+        // Copy the downloaded file to the destination.
+        // (Avoid `rename` because it fails if the destination is on a different drive.)
+        fs.copyFileSync(result.downloadedFiles[0], destination);
+        fs.unlinkSync(result.downloadedFiles[0]);
     } else {
         console.warn(
             "Unexpected downloads for signed Firefox extension, expected 1."
@@ -39,8 +42,7 @@ async function sign(
         process.env.MOZILLA_API_SECRET &&
         process.env.FIREFOX_EXTENSION_ID
     ) {
-        // TODO: Read from unsigned xpi.
-        const { version } = require("../build/manifest.json");
+        const { version } = require("../assets/manifest.json");
         await sign(
             process.env.MOZILLA_API_KEY,
             process.env.MOZILLA_API_SECRET,
@@ -54,4 +56,8 @@ async function sign(
             "Skipping signing of Firefox extension. To enable this, please provide MOZILLA_API_KEY, MOZILLA_API_SECRET and FIREFOX_EXTENSION_ID environment variables"
         );
     }
-})();
+})().catch((error) => {
+    console.error("Error while signing Firefox extension:");
+    console.error(error);
+    process.exit(-1);
+});

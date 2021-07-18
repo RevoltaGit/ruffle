@@ -1,3 +1,5 @@
+#![allow(clippy::unusual_byte_groupings)]
+
 use crate::avm2::opcode::OpCode;
 use crate::avm2::types::*;
 use crate::string::SwfStr;
@@ -63,8 +65,8 @@ impl<W: Write> SwfWriteExt for Writer<W> {
 }
 
 impl<W: Write> Writer<W> {
-    pub fn new(output: W) -> Writer<W> {
-        Writer { output }
+    pub fn new(output: W) -> Self {
+        Self { output }
     }
 
     pub fn write(&mut self, abc_file: AbcFile) -> Result<()> {
@@ -124,28 +126,14 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
-    #[allow(dead_code)]
     fn write_i24(&mut self, n: i32) -> Result<()> {
-        // TODO: Verify n fits in 24-bits.
-        self.write_u8(((n >> 16) & 0xff) as u8)?;
-        self.write_u8(((n >> 8) & 0xff) as u8)?;
-        self.write_u8((n & 0xff) as u8)?;
-        Ok(())
+        let bytes = n.to_le_bytes();
+        debug_assert!(bytes[3] == 0 || bytes[3] == 0xFF);
+        self.output.write_all(&bytes[..3])
     }
 
-    fn write_i32(&mut self, mut n: i32) -> Result<()> {
-        loop {
-            let byte = (n as u8) & 0x7f;
-            n >>= 7;
-            if n != 0 && n != -1 {
-                self.write_u8(0b1_0000000 | byte)?;
-            } else {
-                self.write_u8(byte)?;
-                break;
-            }
-        }
-
-        Ok(())
+    fn write_i32(&mut self, n: i32) -> Result<()> {
+        self.write_u32(n as u32)
     }
 
     fn write_index<T>(&mut self, i: &Index<T>) -> Result<()> {
@@ -890,6 +878,11 @@ impl<W: Write> Writer<W> {
             Op::Label => self.write_opcode(OpCode::Label)?,
             Op::LessEquals => self.write_opcode(OpCode::LessEquals)?,
             Op::LessThan => self.write_opcode(OpCode::LessThan)?,
+            Op::Lf32 => self.write_opcode(OpCode::Lf32)?,
+            Op::Lf64 => self.write_opcode(OpCode::Lf64)?,
+            Op::Li16 => self.write_opcode(OpCode::Li16)?,
+            Op::Li32 => self.write_opcode(OpCode::Li32)?,
+            Op::Li8 => self.write_opcode(OpCode::Li8)?,
             Op::LookupSwitch {
                 default_offset,
                 ref case_offsets,
@@ -998,10 +991,18 @@ impl<W: Write> Writer<W> {
                 self.write_opcode(OpCode::SetSuper)?;
                 self.write_index(index)?;
             }
+            Op::Sf32 => self.write_opcode(OpCode::Sf32)?,
+            Op::Sf64 => self.write_opcode(OpCode::Sf64)?,
+            Op::Si16 => self.write_opcode(OpCode::Si16)?,
+            Op::Si32 => self.write_opcode(OpCode::Si32)?,
+            Op::Si8 => self.write_opcode(OpCode::Si8)?,
             Op::StrictEquals => self.write_opcode(OpCode::StrictEquals)?,
             Op::Subtract => self.write_opcode(OpCode::Subtract)?,
             Op::SubtractI => self.write_opcode(OpCode::SubtractI)?,
             Op::Swap => self.write_opcode(OpCode::Swap)?,
+            Op::Sxi1 => self.write_opcode(OpCode::Sxi1)?,
+            Op::Sxi16 => self.write_opcode(OpCode::Sxi16)?,
+            Op::Sxi8 => self.write_opcode(OpCode::Sxi8)?,
             Op::Throw => self.write_opcode(OpCode::Throw)?,
             Op::TypeOf => self.write_opcode(OpCode::TypeOf)?,
             Op::URShift => self.write_opcode(OpCode::URShift)?,
@@ -1036,5 +1037,22 @@ pub mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn write_i24() {
+        let write = |n: i32| {
+            let mut out = vec![];
+            {
+                let mut writer = Writer::new(&mut out);
+                writer.write_i24(n).unwrap();
+            }
+            out
+        };
+
+        assert_eq!(write(0), &[0, 0, 0]);
+        assert_eq!(write(2), &[2, 0, 0]);
+        assert_eq!(write(77777), &[0b1101_0001, 0b0010_1111, 0b0000_0001]);
+        assert_eq!(write(-77777), &[0b0010_1111, 0b1101_0000, 0b1111_1110]);
     }
 }

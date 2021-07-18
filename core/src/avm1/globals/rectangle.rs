@@ -4,9 +4,34 @@ use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::globals::point::{construct_new_point, point_to_object, value_to_point};
-use crate::avm1::property::Attribute;
+use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{AvmString, Object, ScriptObject, TObject, Value};
 use gc_arena::MutationContext;
+
+const PROTO_DECLS: &[Declaration] = declare_properties! {
+    "toString" => method(to_string);
+    "isEmpty" => method(is_empty);
+    "setEmpty" => method(set_empty);
+    "clone" => method(clone);
+    "contains" => method(contains);
+    "containsPoint" => method(contains_point);
+    "containsRectangle" => method(contains_rectangle);
+    "intersects" => method(intersects);
+    "union" => method(union);
+    "inflate" => method(inflate);
+    "inflatePoint" => method(inflate_point);
+    "offset" => method(offset);
+    "offsetPoint" => method(offset_point);
+    "intersection" => method(intersection);
+    "equals" => method(equals);
+    "left" => property(get_left, set_left; DONT_ENUM | DONT_DELETE);
+    "top" => property(get_top, set_top; DONT_ENUM | DONT_DELETE);
+    "right" => property(get_right, set_right; DONT_ENUM | DONT_DELETE);
+    "bottom" => property(get_bottom, set_bottom; DONT_ENUM | DONT_DELETE);
+    "size" => property(get_size, set_size; DONT_ENUM | DONT_DELETE);
+    "topLeft" => property(get_top_left, set_top_left; DONT_ENUM | DONT_DELETE);
+    "bottomRight" => property(get_bottom_right, set_bottom_right; DONT_ENUM | DONT_DELETE);
+};
 
 fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
@@ -282,14 +307,11 @@ fn union<'gc>(
         this_bottom.max(other_bottom)
     } - top;
 
-    let args = [
-        Value::Number(left),
-        Value::Number(top),
-        Value::Number(width),
-        Value::Number(height),
-    ];
     let constructor = activation.context.avm1.prototypes.rectangle_constructor;
-    let result = constructor.construct(activation, &args)?;
+    let result = constructor.construct(
+        activation,
+        &[left.into(), top.into(), width.into(), height.into()],
+    )?;
     Ok(result)
 }
 
@@ -313,10 +335,10 @@ fn inflate<'gc>(
         .to_owned()
         .coerce_to_f64(activation)?;
 
-    this.set("x", Value::Number(x - horizontal), activation)?;
-    this.set("y", Value::Number(y - vertical), activation)?;
-    this.set("width", Value::Number(width + horizontal * 2.0), activation)?;
-    this.set("height", Value::Number(height + vertical * 2.0), activation)?;
+    this.set("x", (x - horizontal).into(), activation)?;
+    this.set("y", (y - vertical).into(), activation)?;
+    this.set("width", (width + horizontal * 2.0).into(), activation)?;
+    this.set("height", (height + vertical * 2.0).into(), activation)?;
 
     Ok(Value::Undefined)
 }
@@ -335,10 +357,10 @@ fn inflate_point<'gc>(
         activation,
     )?;
 
-    this.set("x", Value::Number(x - horizontal), activation)?;
-    this.set("y", Value::Number(y - vertical), activation)?;
-    this.set("width", Value::Number(width + horizontal * 2.0), activation)?;
-    this.set("height", Value::Number(height + vertical * 2.0), activation)?;
+    this.set("x", (x - horizontal).into(), activation)?;
+    this.set("y", (y - vertical).into(), activation)?;
+    this.set("width", (width + horizontal * 2.0).into(), activation)?;
+    this.set("height", (height + vertical * 2.0).into(), activation)?;
 
     Ok(Value::Undefined)
 }
@@ -361,8 +383,8 @@ fn offset<'gc>(
         .to_owned()
         .coerce_to_f64(activation)?;
 
-    this.set("x", Value::Number(x + horizontal), activation)?;
-    this.set("y", Value::Number(y + vertical), activation)?;
+    this.set("x", (x + horizontal).into(), activation)?;
+    this.set("y", (y + vertical).into(), activation)?;
 
     Ok(Value::Undefined)
 }
@@ -379,8 +401,8 @@ fn offset_point<'gc>(
         activation,
     )?;
 
-    this.set("x", Value::Number(x + horizontal), activation)?;
-    this.set("y", Value::Number(y + vertical), activation)?;
+    this.set("x", (x + horizontal).into(), activation)?;
+    this.set("y", (y + vertical).into(), activation)?;
 
     Ok(Value::Undefined)
 }
@@ -435,14 +457,16 @@ fn intersection<'gc>(
         top = 0.0;
     }
 
-    let args = [
-        Value::Number(left),
-        Value::Number(top),
-        Value::Number(right - left),
-        Value::Number(bottom - top),
-    ];
     let constructor = activation.context.avm1.prototypes.rectangle_constructor;
-    let result = constructor.construct(activation, &args)?;
+    let result = constructor.construct(
+        activation,
+        &[
+            left.into(),
+            top.into(),
+            (right - left).into(),
+            (bottom - top).into(),
+        ],
+    )?;
     Ok(result)
 }
 
@@ -492,7 +516,7 @@ fn set_left<'gc>(
     this.set("x", new_left, activation)?;
     this.set(
         "width",
-        Value::Number(width + (old_left - new_left.coerce_to_f64(activation)?)),
+        (width + (old_left - new_left.coerce_to_f64(activation)?)).into(),
         activation,
     )?;
     Ok(Value::Undefined)
@@ -517,7 +541,7 @@ fn set_top<'gc>(
     this.set("y", new_top, activation)?;
     this.set(
         "height",
-        Value::Number(height + (old_top - new_top.coerce_to_f64(activation)?)),
+        (height + (old_top - new_top.coerce_to_f64(activation)?)).into(),
         activation,
     )?;
     Ok(Value::Undefined)
@@ -545,7 +569,7 @@ fn set_right<'gc>(
     };
     let x = this.get("x", activation)?.coerce_to_f64(activation)?;
 
-    this.set("width", Value::Number(right - x), activation)?;
+    this.set("width", (right - x).into(), activation)?;
 
     Ok(Value::Undefined)
 }
@@ -572,7 +596,7 @@ fn set_bottom<'gc>(
     };
     let y = this.get("y", activation)?.coerce_to_f64(activation)?;
 
-    this.set("height", Value::Number(bottom - y), activation)?;
+    this.set("height", (bottom - y).into(), activation)?;
 
     Ok(Value::Undefined)
 }
@@ -635,12 +659,12 @@ fn set_top_left<'gc>(
     this.set("y", new_top, activation)?;
     this.set(
         "width",
-        Value::Number(width + (old_left - new_left.coerce_to_f64(activation)?)),
+        (width + (old_left - new_left.coerce_to_f64(activation)?)).into(),
         activation,
     )?;
     this.set(
         "height",
-        Value::Number(height + (old_top - new_top.coerce_to_f64(activation)?)),
+        (height + (old_top - new_top.coerce_to_f64(activation)?)).into(),
         activation,
     )?;
 
@@ -672,8 +696,8 @@ fn set_bottom_right<'gc>(
     let top = this.get("x", activation)?.coerce_to_f64(activation)?;
     let left = this.get("y", activation)?.coerce_to_f64(activation)?;
 
-    this.set("width", Value::Number(bottom - top), activation)?;
-    this.set("height", Value::Number(right - left), activation)?;
+    this.set("width", (bottom - top).into(), activation)?;
+    this.set("height", (right - left).into(), activation)?;
 
     Ok(Value::Undefined)
 }
@@ -683,253 +707,7 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let mut object = ScriptObject::object(gc_context, Some(proto));
-
-    object.force_set_function(
-        "toString",
-        to_string,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "isEmpty",
-        is_empty,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "setEmpty",
-        set_empty,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "clone",
-        clone,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "contains",
-        contains,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "containsPoint",
-        contains_point,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "containsRectangle",
-        contains_rectangle,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "intersects",
-        intersects,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "union",
-        union,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "inflate",
-        inflate,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "inflatePoint",
-        inflate_point,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "offset",
-        offset,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "offsetPoint",
-        offset_point,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "intersection",
-        intersection,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.force_set_function(
-        "equals",
-        equals,
-        gc_context,
-        Attribute::empty(),
-        Some(fn_proto),
-    );
-
-    object.add_property(
-        gc_context,
-        "left",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(get_left),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_left),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::DONT_DELETE | Attribute::DONT_ENUM,
-    );
-
-    object.add_property(
-        gc_context,
-        "top",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(get_top),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_top),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::DONT_DELETE | Attribute::DONT_ENUM,
-    );
-
-    object.add_property(
-        gc_context,
-        "right",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(get_right),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_right),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::DONT_DELETE | Attribute::DONT_ENUM,
-    );
-
-    object.add_property(
-        gc_context,
-        "bottom",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(get_bottom),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_bottom),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::DONT_DELETE | Attribute::DONT_ENUM,
-    );
-
-    object.add_property(
-        gc_context,
-        "size",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(get_size),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_size),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::DONT_DELETE | Attribute::DONT_ENUM,
-    );
-
-    object.add_property(
-        gc_context,
-        "topLeft",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(get_top_left),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_top_left),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::DONT_DELETE | Attribute::DONT_ENUM,
-    );
-
-    object.add_property(
-        gc_context,
-        "bottomRight",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(get_bottom_right),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_bottom_right),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::DONT_DELETE | Attribute::DONT_ENUM,
-    );
-
+    let object = ScriptObject::object(gc_context, Some(proto));
+    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     object.into()
 }

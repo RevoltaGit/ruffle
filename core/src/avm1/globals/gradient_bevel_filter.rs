@@ -2,12 +2,25 @@
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::object::bevel_filter::BevelFilterType;
 use crate::avm1::object::gradient_bevel_filter::GradientBevelFilterObject;
-use crate::avm1::property::Attribute;
-use crate::avm1::{AvmString, Object, ScriptObject, TObject, Value};
+use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::{ArrayObject, AvmString, Object, TObject, Value};
 use gc_arena::MutationContext;
+
+const PROTO_DECLS: &[Declaration] = declare_properties! {
+    "distance" => property(distance, set_distance);
+    "angle" => property(angle, set_angle);
+    "colors" => property(colors, set_colors);
+    "alphas" => property(alphas, set_alphas);
+    "ratios" => property(ratios, set_ratios);
+    "blurX" => property(blur_x, set_blur_x);
+    "blurY" => property(blur_y, set_blur_y);
+    "strength" => property(strength, set_strength);
+    "quality" => property(quality, set_quality);
+    "type" => property(get_type, set_type);
+    "knockout" => property(knockout, set_knockout);
+};
 
 pub fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc, '_>,
@@ -46,10 +59,7 @@ pub fn set_distance<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let distance = args
-        .get(0)
-        .unwrap_or(&4.0.into())
-        .coerce_to_f64(activation)?;
+    let distance = args.get(0).unwrap_or(&4.into()).coerce_to_f64(activation)?;
 
     if let Some(object) = this.as_gradient_bevel_filter_object() {
         object.set_distance(activation.context.gc_context, distance);
@@ -99,18 +109,12 @@ pub fn colors<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(filter) = this.as_gradient_bevel_filter_object() {
-        let array = ScriptObject::array(
+        return Ok(ArrayObject::new(
             activation.context.gc_context,
-            Some(activation.context.avm1.prototypes.array),
-        );
-
-        let arr = filter.colors();
-
-        for (index, item) in arr.iter().copied().enumerate() {
-            array.set_array_element(index, item.into(), activation.context.gc_context);
-        }
-
-        return Ok(array.into());
+            activation.context.avm1.prototypes().array,
+            filter.colors().iter().map(|&x| x.into()),
+        )
+        .into());
     }
 
     Ok(Value::Undefined)
@@ -125,16 +129,18 @@ pub fn set_colors<'gc>(
 
     if let Value::Object(obj) = colors {
         if let Some(filter) = this.as_gradient_bevel_filter_object() {
-            let arr_len = obj.length();
+            let arr_len = obj.length(activation)? as usize;
             let mut colors_arr = Vec::with_capacity(arr_len);
 
             let old_alphas = filter.alphas();
             let mut alphas_arr = Vec::with_capacity(arr_len);
 
-            for index in 0..arr_len {
-                let col = obj.array_element(index).coerce_to_u32(activation)?;
+            for i in 0..arr_len {
+                let col = obj
+                    .get_element(activation, i as i32)
+                    .coerce_to_u32(activation)?;
 
-                let alpha = if let Some(alpha) = old_alphas.get(index) {
+                let alpha = if let Some(alpha) = old_alphas.get(i) {
                     *alpha
                 } else if col >> 24 == 0 {
                     0.0
@@ -163,18 +169,12 @@ pub fn alphas<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(filter) = this.as_gradient_bevel_filter_object() {
-        let array = ScriptObject::array(
+        return Ok(ArrayObject::new(
             activation.context.gc_context,
-            Some(activation.context.avm1.prototypes.array),
-        );
-
-        let arr = filter.alphas();
-
-        for (index, item) in arr.iter().copied().enumerate() {
-            array.set_array_element(index, item.into(), activation.context.gc_context);
-        }
-
-        return Ok(array.into());
+            activation.context.avm1.prototypes().array,
+            filter.alphas().iter().map(|&x| x.into()),
+        )
+        .into());
     }
 
     Ok(Value::Undefined)
@@ -189,25 +189,25 @@ pub fn set_alphas<'gc>(
 
     if let Value::Object(obj) = alphas {
         if let Some(filter) = this.as_gradient_bevel_filter_object() {
-            let arr_len = obj.length().min(filter.colors().len());
-            let mut arr = Vec::with_capacity(arr_len);
+            let length = (obj.length(activation)? as usize).min(filter.colors().len());
 
-            for index in 0..arr_len {
-                arr.push(
-                    obj.array_element(index)
+            let alphas: Result<Vec<_>, Error<'gc>> = (0..length)
+                .map(|i| {
+                    Ok(obj
+                        .get_element(activation, i as i32)
                         .coerce_to_f64(activation)?
-                        .max(0.0)
-                        .min(1.0),
-                );
-            }
+                        .clamp(0.0, 1.0))
+                })
+                .collect();
+            let alphas = alphas?;
 
-            let colors = filter.colors().into_iter().take(arr_len).collect();
+            let colors = filter.colors().into_iter().take(length).collect();
             filter.set_colors(activation.context.gc_context, colors);
 
-            let ratios = filter.ratios().into_iter().take(arr_len).collect();
+            let ratios = filter.ratios().into_iter().take(length).collect();
             filter.set_ratios(activation.context.gc_context, ratios);
 
-            filter.set_alphas(activation.context.gc_context, arr);
+            filter.set_alphas(activation.context.gc_context, alphas);
         }
     }
 
@@ -220,18 +220,12 @@ pub fn ratios<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(filter) = this.as_gradient_bevel_filter_object() {
-        let array = ScriptObject::array(
+        return Ok(ArrayObject::new(
             activation.context.gc_context,
-            Some(activation.context.avm1.prototypes.array),
-        );
-
-        let arr = filter.ratios();
-
-        for (index, item) in arr.iter().copied().enumerate() {
-            array.set_array_element(index, item.into(), activation.context.gc_context);
-        }
-
-        return Ok(array.into());
+            activation.context.avm1.prototypes().array,
+            filter.ratios().iter().map(|&x| x.into()),
+        )
+        .into());
     }
 
     Ok(Value::Undefined)
@@ -246,25 +240,25 @@ pub fn set_ratios<'gc>(
 
     if let Value::Object(obj) = ratios {
         if let Some(filter) = this.as_gradient_bevel_filter_object() {
-            let arr_len = obj.length().min(filter.colors().len());
-            let mut arr = Vec::with_capacity(arr_len);
+            let length = (obj.length(activation)? as usize).min(filter.colors().len());
 
-            for index in 0..arr_len {
-                arr.push(
-                    obj.array_element(index)
+            let ratios: Result<Vec<_>, Error<'gc>> = (0..length)
+                .map(|i| {
+                    Ok(obj
+                        .get_element(activation, i as i32)
                         .coerce_to_i32(activation)?
-                        .max(0)
-                        .min(255) as u8,
-                );
-            }
+                        .clamp(0, 255) as u8)
+                })
+                .collect();
+            let ratios = ratios?;
 
-            let colors = filter.colors().into_iter().take(arr_len).collect();
+            let colors = filter.colors().into_iter().take(length).collect();
             filter.set_colors(activation.context.gc_context, colors);
 
-            let alphas = filter.alphas().into_iter().take(arr_len).collect();
+            let alphas = filter.alphas().into_iter().take(length).collect();
             filter.set_alphas(activation.context.gc_context, alphas);
 
-            filter.set_ratios(activation.context.gc_context, arr);
+            filter.set_ratios(activation.context.gc_context, ratios);
         }
     }
 
@@ -290,7 +284,7 @@ pub fn set_blur_x<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let blur_x = args
         .get(0)
-        .unwrap_or(&4.0.into())
+        .unwrap_or(&4.into())
         .coerce_to_f64(activation)
         .map(|x| x.max(0.0).min(255.0))?;
 
@@ -320,7 +314,7 @@ pub fn set_blur_y<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let blur_y = args
         .get(0)
-        .unwrap_or(&4.0.into())
+        .unwrap_or(&4.into())
         .coerce_to_f64(activation)
         .map(|x| x.max(0.0).min(255.0))?;
 
@@ -350,7 +344,7 @@ pub fn set_strength<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let strength = args
         .get(0)
-        .unwrap_or(&1.0.into())
+        .unwrap_or(&1.into())
         .coerce_to_f64(activation)
         .map(|x| x.max(0.0).min(255.0))?;
 
@@ -380,7 +374,7 @@ pub fn set_quality<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let quality = args
         .get(0)
-        .unwrap_or(&1.0.into())
+        .unwrap_or(&1.into())
         .coerce_to_i32(activation)
         .map(|x| x.max(0).min(15))?;
 
@@ -411,10 +405,7 @@ pub fn set_type<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let type_: BevelFilterType = args
         .get(0)
-        .unwrap_or(&Value::String(AvmString::new(
-            activation.context.gc_context,
-            "inner".to_string(),
-        )))
+        .unwrap_or(&"inner".into())
         .coerce_to_string(activation)
         .map(|s| s.as_str().into())?;
 
@@ -445,7 +436,7 @@ pub fn set_knockout<'gc>(
     let knockout = args
         .get(0)
         .unwrap_or(&false.into())
-        .as_bool(activation.current_swf_version());
+        .as_bool(activation.swf_version());
 
     if let Some(object) = this.as_gradient_bevel_filter_object() {
         object.set_knockout(activation.context.gc_context, knockout);
@@ -461,204 +452,6 @@ pub fn create_proto<'gc>(
 ) -> Object<'gc> {
     let color_matrix_filter = GradientBevelFilterObject::empty_object(gc_context, Some(proto));
     let object = color_matrix_filter.as_script_object().unwrap();
-
-    object.add_property(
-        gc_context,
-        "distance",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(distance),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_distance),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
-    object.add_property(
-        gc_context,
-        "angle",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(angle),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_angle),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
-    object.add_property(
-        gc_context,
-        "colors",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(colors),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_colors),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
-    object.add_property(
-        gc_context,
-        "alphas",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(alphas),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_alphas),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
-    object.add_property(
-        gc_context,
-        "ratios",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(ratios),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_ratios),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
-    object.add_property(
-        gc_context,
-        "blurX",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(blur_x),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_blur_x),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
-    object.add_property(
-        gc_context,
-        "blurY",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(blur_y),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_blur_y),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
-    object.add_property(
-        gc_context,
-        "strength",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(strength),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_strength),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
-    object.add_property(
-        gc_context,
-        "quality",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(quality),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_quality),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
-    object.add_property(
-        gc_context,
-        "type",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(get_type),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_type),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
-    object.add_property(
-        gc_context,
-        "knockout",
-        FunctionObject::function(
-            gc_context,
-            Executable::Native(knockout),
-            Some(fn_proto),
-            fn_proto,
-        ),
-        Some(FunctionObject::function(
-            gc_context,
-            Executable::Native(set_knockout),
-            Some(fn_proto),
-            fn_proto,
-        )),
-        Attribute::empty(),
-    );
-
+    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     color_matrix_filter.into()
 }

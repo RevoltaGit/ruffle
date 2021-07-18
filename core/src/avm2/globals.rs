@@ -109,6 +109,9 @@ pub struct SystemPrototypes<'gc> {
     pub graphics: Object<'gc>,
     pub loaderinfo: Object<'gc>,
     pub bytearray: Object<'gc>,
+    pub stage: Object<'gc>,
+    pub sprite: Object<'gc>,
+    pub simplebutton: Object<'gc>,
 }
 
 impl<'gc> SystemPrototypes<'gc> {
@@ -153,6 +156,9 @@ impl<'gc> SystemPrototypes<'gc> {
             graphics: empty,
             loaderinfo: empty,
             bytearray: empty,
+            stage: empty,
+            sprite: empty,
+            simplebutton: empty,
         }
     }
 }
@@ -162,7 +168,7 @@ fn function<'gc>(
     mc: MutationContext<'gc, '_>,
     package: impl Into<AvmString<'gc>>,
     name: impl Into<AvmString<'gc>>,
-    nf: NativeMethod<'gc>,
+    nf: NativeMethod,
     fn_proto: Object<'gc>,
     mut domain: Domain<'gc>,
     script: Script<'gc>,
@@ -383,7 +389,7 @@ pub fn load_player_globals<'gc>(
     let (class_constr, class_proto, class_class) =
         class::create_class(activation, gs, object_proto, fn_proto);
 
-    let object_constr = object::fill_proto(mc, object_proto, fn_proto);
+    let object_constr = object::fill_proto(activation, object_proto, fn_proto)?;
 
     dynamic_class(mc, object_constr, object_class, domain, script)?;
     dynamic_class(mc, function_constr, fn_class, domain, script)?;
@@ -592,6 +598,14 @@ pub fn load_player_globals<'gc>(
         script,
     )?;
 
+    class(
+        activation,
+        flash::utils::compression_algorithm::create_class(mc),
+        implicit_deriver,
+        domain,
+        script,
+    )?;
+
     function(
         mc,
         "flash.utils",
@@ -636,6 +650,19 @@ pub fn load_player_globals<'gc>(
         domain,
         script,
     )?;
+    activation
+        .context
+        .avm2
+        .system_prototypes
+        .as_mut()
+        .unwrap()
+        .simplebutton = class(
+        activation,
+        flash::display::simplebutton::create_class(mc),
+        implicit_deriver,
+        domain,
+        script,
+    )?;
     class(
         activation,
         flash::display::displayobjectcontainer::create_class(mc),
@@ -643,7 +670,13 @@ pub fn load_player_globals<'gc>(
         domain,
         script,
     )?;
-    class(
+    activation
+        .context
+        .avm2
+        .system_prototypes
+        .as_mut()
+        .unwrap()
+        .sprite = class(
         activation,
         flash::display::sprite::create_class(mc),
         implicit_deriver,
@@ -746,6 +779,47 @@ pub fn load_player_globals<'gc>(
     class(
         activation,
         flash::display::swfversion::create_class(mc),
+        implicit_deriver,
+        domain,
+        script,
+    )?;
+    activation
+        .context
+        .avm2
+        .system_prototypes
+        .as_mut()
+        .unwrap()
+        .stage = class(
+        activation,
+        flash::display::stage::create_class(mc),
+        implicit_deriver,
+        domain,
+        script,
+    )?;
+    class(
+        activation,
+        flash::display::stagescalemode::create_class(mc),
+        implicit_deriver,
+        domain,
+        script,
+    )?;
+    class(
+        activation,
+        flash::display::stagealign::create_class(mc),
+        implicit_deriver,
+        domain,
+        script,
+    )?;
+    class(
+        activation,
+        flash::display::stagedisplaystate::create_class(mc),
+        implicit_deriver,
+        domain,
+        script,
+    )?;
+    class(
+        activation,
+        flash::display::stagequality::create_class(mc),
         implicit_deriver,
         domain,
         script,

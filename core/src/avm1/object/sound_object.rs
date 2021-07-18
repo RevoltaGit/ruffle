@@ -1,7 +1,5 @@
 //! AVM1 object type to represent Sound objects.
 
-use crate::avm1::activation::Activation;
-use crate::avm1::error::Error;
 use crate::avm1::{Object, ScriptObject, TObject};
 use crate::backend::audio::{SoundHandle, SoundInstanceHandle};
 use crate::display_object::DisplayObject;
@@ -38,7 +36,7 @@ pub struct SoundObjectData<'gc> {
     position: u32,
 
     /// Duration of the currently attached sound in milliseconds.
-    duration: u32,
+    duration: Option<u32>,
 }
 
 impl fmt::Debug for SoundObject<'_> {
@@ -65,16 +63,16 @@ impl<'gc> SoundObject<'gc> {
                 sound_instance: None,
                 owner: None,
                 position: 0,
-                duration: 0,
+                duration: None,
             },
         ))
     }
 
-    pub fn duration(self) -> u32 {
+    pub fn duration(self) -> Option<u32> {
         self.0.read().duration
     }
 
-    pub fn set_duration(self, gc_context: MutationContext<'gc, '_>, duration: u32) {
+    pub fn set_duration(self, gc_context: MutationContext<'gc, '_>, duration: Option<u32>) {
         self.0.write(gc_context).duration = duration;
     }
 
@@ -120,18 +118,8 @@ impl<'gc> SoundObject<'gc> {
 }
 
 impl<'gc> TObject<'gc> for SoundObject<'gc> {
-    impl_custom_object!(base);
-
-    #[allow(clippy::new_ret_no_self)]
-    fn create_bare_object(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        this: Object<'gc>,
-    ) -> Result<Object<'gc>, Error<'gc>> {
-        Ok(SoundObject::empty_sound(activation.context.gc_context, Some(this)).into())
-    }
-
-    fn as_sound_object(&self) -> Option<SoundObject<'gc>> {
-        Some(*self)
-    }
+    impl_custom_object!(base {
+        set(proto: self);
+        bare_object(as_sound_object -> SoundObject::empty_sound);
+    });
 }

@@ -1,7 +1,7 @@
 use fnv::FnvHashMap;
 use generational_arena::Arena;
 use ruffle_core::backend::audio::{
-    decoders::{AdpcmDecoder, Mp3Decoder, NellymoserDecoder},
+    decoders::{AdpcmDecoder, NellymoserDecoder},
     swf::{self, AudioCompression},
     AudioBackend, PreloadStreamHandle, SoundHandle, SoundInstanceHandle, SoundTransform,
 };
@@ -345,7 +345,7 @@ impl WebAudioBackend {
 
                 let buffer_source_node = node.clone();
 
-                let sound_sample_rate = f64::from(sound.format.sample_rate);
+                let sound_sample_rate: f64 = sound.format.sample_rate.into();
                 let mut is_stereo = sound.format.is_stereo;
                 let node: web_sys::AudioNode = match settings {
                     Some(settings)
@@ -446,11 +446,6 @@ impl WebAudioBackend {
                         std::io::Cursor::new(audio_data.to_vec()),
                         sound.format.is_stereo,
                         sound.format.sample_rate,
-                    )),
-                    AudioCompression::Mp3 => Box::new(Mp3Decoder::new(
-                        if sound.format.is_stereo { 2 } else { 1 },
-                        sound.format.sample_rate.into(),
-                        std::io::Cursor::new(audio_data.to_vec()), //&sound.data[..]
                     )),
                     AudioCompression::Nellymoser => Box::new(NellymoserDecoder::new(
                         std::io::Cursor::new(audio_data.to_vec()),
@@ -620,13 +615,13 @@ impl WebAudioBackend {
                 for block in adpcm_block_offsets.windows(2) {
                     let start = block[0];
                     let end = block[1];
-                    let mut decoder = AdpcmDecoder::new(
+                    let decoder = AdpcmDecoder::new(
                         &audio_data[start..end],
                         format.is_stereo,
                         format.sample_rate,
                     );
                     if format.is_stereo {
-                        while let Some(frame) = decoder.next() {
+                        for frame in decoder {
                             let (l, r) = (frame[0], frame[1]);
                             self.left_samples.push(f32::from(l) / 32767.0);
                             self.right_samples.push(f32::from(r) / 32767.0);
@@ -800,7 +795,7 @@ impl AudioBackend for WebAudioBackend {
     fn register_sound(&mut self, sound: &swf::Sound) -> Result<SoundHandle, Error> {
         // Slice off latency seek for MP3 data.
         let (skip_sample_frames, data) = if sound.format.compression == AudioCompression::Mp3 {
-            let skip_sample_frames = u16::from(sound.data[0]) | (u16::from(sound.data[1]) << 8);
+            let skip_sample_frames = u16::from_le_bytes([sound.data[0], sound.data[1]]);
             (skip_sample_frames, &sound.data[2..])
         } else {
             (0, sound.data)
@@ -869,8 +864,8 @@ impl AudioBackend for WebAudioBackend {
                     // previous blocks had more samples than necessary, or because the stream
                     // is stopping (silence).
                     if audio_data.len() >= 4 {
-                        let num_sample_frames =
-                            u32::from(audio_data[0]) | (u32::from(audio_data[1]) << 8);
+                        let num_sample_frames: u32 =
+                            u16::from_le_bytes([audio_data[0], audio_data[1]]).into();
                         stream.num_sample_frames += num_sample_frames;
                         // MP3 streaming data:
                         // First two bytes = number of samples
@@ -1029,9 +1024,10 @@ impl AudioBackend for WebAudioBackend {
 
     fn get_sound_duration(&self, sound: SoundHandle) -> Option<u32> {
         if let Some(sound) = self.sounds.get(sound) {
-            // AS duration does not subtract skip_sample_frames.
-            let num_sample_frames = u64::from(sound.num_sample_frames);
-            let ms = num_sample_frames * 1000 / u64::from(sound.format.sample_rate);
+            // AS duration does not subtract `skip_sample_frames`.
+            let num_sample_frames: f64 = sound.num_sample_frames.into();
+            let sample_rate: f64 = sound.format.sample_rate.into();
+            let ms = (num_sample_frames * 1000.0 / sample_rate).round();
             Some(ms as u32)
         } else {
             None
@@ -1088,10 +1084,10 @@ fn resample(
     std::iter::from_fn(move || {
         if let (Some(l0), Some(r0), Some(l1), Some(r1)) = (left0, right0, left1, right1) {
             let a = t / dt_input;
-            let l0 = f64::from(l0);
-            let l1 = f64::from(l1);
-            let r0 = f64::from(r0);
-            let r1 = f64::from(r1);
+            let l0: f64 = l0.into();
+            let l1: f64 = l1.into();
+            let r0: f64 = r0.into();
+            let r1: f64 = r1.into();
             left = (l0 + (l1 - l0) * a) as i16;
             right = (r0 + (r1 - r0) * a) as i16;
             t += dt_output;
